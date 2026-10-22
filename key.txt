@@ -1,0 +1,12 @@
+# Key pakai username
+BLR-2SVS-LYJM-Q8BD-YMR5|Budi123|1795592000 # Budi123 | 30 Hari
+BLR-BM27-EGJG-FKTB-7PTC|andi_99|perm # andi_99 | Permanen
+
+# Key pakai UserId (aman kalau pembeli ganti username)
+BLR-K4TN-7XQD-M2VA-9HWE|1750747957|perm # Vellord | Permanen
+
+# Satu key untuk dua akun
+BLR-P8CF-3RZL-6YUB-D5GN|Budi123,andi_99|1795592000
+
+# Siapa saja boleh pakai
+BLR-V26F-V9E3-MKTP-SS3D|*|perm
