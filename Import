@@ -139,7 +139,7 @@ end
 
 local function fmtDur(sec)
     sec = math.max(0, math.floor(sec))
-    if sec >= 86400 then
+    if sec >= 172800 then
         return ("%d hari %d jam"):format(math.floor(sec / 86400), math.floor((sec % 86400) / 3600))
     end
     return ("%d jam %d menit"):format(math.floor(sec / 3600), math.floor((sec % 3600) / 60))
@@ -316,7 +316,15 @@ local function requireKey()
         end
     end
 
+    -- trial otomatis: pemakai baru langsung masuk tanpa key selama TRIAL_HOURS jam
     local tState, tLeft = trialState()
+    if tState == "fresh" and writeTrial(nowTs()) then
+        tState, tLeft = "active", TRIAL_SECONDS
+    end
+    if tState == "active" then
+        accessTag, accessInfo, accessExpiry = "TRIAL", "Trial gratis, sisa " .. fmtDur(tLeft), nowTs() + tLeft
+        return true
+    end
 
     local kgui = new("ScreenGui", {Name = "BalereotKey", ResetOnSpawn = false, ZIndexBehavior = Enum.ZIndexBehavior.Sibling, DisplayOrder = 1000}, nil)
     local mounted = pcall(function() kgui.Parent = (gethui and gethui()) or game:GetService("CoreGui") end)
