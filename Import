@@ -3,6 +3,7 @@
 --   Tab IMPORT FILE : import file .rbxm / .rbxmx / .rbxl / .rbxlx dari workspace executor
 --   Akses           : key (terikat username + masa aktif) atau trial gratis 1 hari per akun
 --   Pembuat key     : BalereotKeyManager.lua (script terpisah, khusus owner)
+--   TEMA            : Midnight Sapphire (premium) + animasi tombol
 
 local Players = game:GetService("Players")
 local TweenService = game:GetService("TweenService")
@@ -63,14 +64,15 @@ local BG_ASSET_ID = 102728536712814   -- ID gambar logo BALEREOT COMMUNITY
 local BG_URL = nil            -- atau link langsung (raw) ke file PNG, contoh dari GitHub
 local BG_TRANSPARENCY = 0.6   -- 0 = jelas, 1 = hilang
 
+-- PALET PREMIUM: Midnight Sapphire + Aqua + Gold
 local C = {
-    bg = Color3.fromRGB(8, 4, 16), panel = Color3.fromRGB(22, 12, 40),
-    header = Color3.fromRGB(16, 8, 30), input = Color3.fromRGB(28, 16, 50),
-    stroke = Color3.fromRGB(95, 45, 160), accent = Color3.fromRGB(150, 60, 235),
-    accent2 = Color3.fromRGB(205, 205, 220), cyan = Color3.fromRGB(190, 120, 255),
-    text = Color3.fromRGB(238, 232, 250), sub = Color3.fromRGB(165, 145, 200),
-    dim = Color3.fromRGB(100, 80, 135), green = Color3.fromRGB(80, 230, 140),
-    red = Color3.fromRGB(255, 90, 90), yellow = Color3.fromRGB(255, 196, 60),
+    bg = Color3.fromRGB(7, 9, 18), panel = Color3.fromRGB(15, 18, 34),
+    header = Color3.fromRGB(10, 12, 24), input = Color3.fromRGB(21, 25, 46),
+    stroke = Color3.fromRGB(52, 62, 120), accent = Color3.fromRGB(92, 92, 255),
+    accent2 = Color3.fromRGB(120, 240, 225), cyan = Color3.fromRGB(60, 200, 255),
+    text = Color3.fromRGB(236, 240, 255), sub = Color3.fromRGB(146, 158, 200),
+    dim = Color3.fromRGB(86, 96, 140), green = Color3.fromRGB(70, 235, 160),
+    red = Color3.fromRGB(255, 86, 110), yellow = Color3.fromRGB(255, 200, 80),
     white = Color3.new(1, 1, 1),
 }
 
@@ -94,6 +96,156 @@ local function spin(grad, seconds)
 end
 local function thumb(id, size)
     return ("rbxthumb://type=Asset&id=%d&w=%d&h=%d"):format(id, size, size)
+end
+
+-- =====================================================================
+-- TEMA OTOMATIS + ANIMASI
+--   - warna ungu lama otomatis diganti ke tema baru
+--   - tombol: hover membesar, ditekan menciut, dilepas memantul + ripple
+--   - jendela utama & layar key muncul dengan animasi pop
+--   - garis header berkilau bergerak
+-- =====================================================================
+do
+    local GuiService = game:GetService("GuiService")
+    local Debris = game:GetService("Debris")
+
+    local function key(c)
+        return math.round(c.R * 255) .. "," .. math.round(c.G * 255) .. "," .. math.round(c.B * 255)
+    end
+
+    -- warna lama (hardcode) -> warna baru
+    local MAP = {
+        ["30,12,52"]    = Color3.fromRGB(18, 22, 52),
+        ["14,6,26"]     = Color3.fromRGB(9, 11, 26),
+        ["4,2,10"]      = Color3.fromRGB(4, 5, 14),
+        ["34,14,60"]    = Color3.fromRGB(24, 28, 64),
+        ["12,6,22"]     = Color3.fromRGB(8, 10, 22),
+        ["190,110,255"] = Color3.fromRGB(120, 150, 255),
+        ["190,190,210"] = Color3.fromRGB(120, 235, 225),
+        ["10,6,20"]     = Color3.fromRGB(7, 9, 20),
+        ["90,48,150"]   = Color3.fromRGB(44, 50, 150),
+        ["226,222,250"] = Color3.fromRGB(190, 220, 255),
+        ["248,249,255"] = Color3.fromRGB(240, 246, 255),
+        ["172,183,238"] = Color3.fromRGB(130, 170, 255),
+    }
+
+    local function recolor(d)
+        pcall(function()
+            if d:IsA("GuiObject") then
+                local n = MAP[key(d.BackgroundColor3)]
+                if n then d.BackgroundColor3 = n end
+                if d:IsA("TextLabel") or d:IsA("TextButton") or d:IsA("TextBox") then
+                    n = MAP[key(d.TextColor3)]
+                    if n then d.TextColor3 = n end
+                elseif d:IsA("ImageLabel") or d:IsA("ImageButton") then
+                    n = MAP[key(d.ImageColor3)]
+                    if n then d.ImageColor3 = n end
+                end
+            elseif d:IsA("UIStroke") then
+                local n = MAP[key(d.Color)]
+                if n then d.Color = n end
+            elseif d:IsA("UIGradient") then
+                local list, changed = {}, false
+                for i, k in ipairs(d.Color.Keypoints) do
+                    local n = MAP[key(k.Value)]
+                    if n then changed = true end
+                    list[i] = ColorSequenceKeypoint.new(k.Time, n or k.Value)
+                end
+                if changed then d.Color = ColorSequence.new(list) end
+            end
+        end)
+    end
+
+    local function ripple(b, input)
+        if b.BackgroundTransparency > 0.9 then return end
+        local inset = GuiService:GetGuiInset()
+        local sz = b.AbsoluteSize
+        local rel = Vector2.new(input.Position.X, input.Position.Y) - inset - b.AbsolutePosition
+        rel = Vector2.new(math.clamp(rel.X, 0, sz.X), math.clamp(rel.Y, 0, sz.Y))
+        local dot = Instance.new("Frame")
+        dot.AnchorPoint = Vector2.new(0.5, 0.5)
+        dot.Position = UDim2.fromOffset(rel.X, rel.Y)
+        dot.Size = UDim2.fromOffset(0, 0)
+        dot.BackgroundColor3 = Color3.new(1, 1, 1)
+        dot.BackgroundTransparency = 0.65
+        dot.BorderSizePixel = 0
+        dot.ZIndex = b.ZIndex + 20
+        local cr = Instance.new("UICorner")
+        cr.CornerRadius = UDim.new(1, 0)
+        cr.Parent = dot
+        b.ClipsDescendants = true
+        dot.Parent = b
+        local d = math.max(sz.X, sz.Y) * 2.4
+        TweenService:Create(dot, TweenInfo.new(0.55, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+            {Size = UDim2.fromOffset(d, d), BackgroundTransparency = 1}):Play()
+        Debris:AddItem(dot, 0.6)
+    end
+
+    local function isPress(i)
+        return i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch
+    end
+
+    local function attach(b)
+        if b:GetAttribute("FX") then return end
+        if b.Size.X.Scale >= 1 and b.Size.Y.Scale >= 1 then return end -- overlay layar penuh
+        b:SetAttribute("FX", true)
+        local sc = Instance.new("UIScale")
+        sc.Parent = b
+        local function go(s, t, style)
+            TweenService:Create(sc, TweenInfo.new(t, style or Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {Scale = s}):Play()
+        end
+        local function big() return b.AbsoluteSize.X > 140 end
+        local down = false
+        b.MouseEnter:Connect(function() go(big() and 1.015 or 1.06, 0.15) end)
+        b.MouseLeave:Connect(function() down = false; go(1, 0.2) end)
+        b.InputBegan:Connect(function(i)
+            if isPress(i) then
+                down = true
+                go(big() and 0.97 or 0.88, 0.07)
+                ripple(b, i)
+            end
+        end)
+        b.InputEnded:Connect(function(i)
+            if down and isPress(i) then
+                down = false
+                go(1, 0.45, Enum.EasingStyle.Back)
+            end
+        end)
+    end
+
+    local function pop(f)
+        local s = f:FindFirstChild("FXPop") or Instance.new("UIScale")
+        s.Name = "FXPop"
+        s.Scale = 0.86
+        s.Parent = f
+        TweenService:Create(s, TweenInfo.new(0.5, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {Scale = 1}):Play()
+    end
+
+    local function handle(d)
+        local g = d:FindFirstAncestorWhichIsA("ScreenGui")
+        if not (g and (g.Name == "BalereotKey" or g.Name == "BalereotCommunity")) then return end
+        recolor(d)
+        if d:IsA("TextButton") then
+            attach(d)
+        elseif d:IsA("Frame") and d.Active and d.Parent:IsA("ScreenGui") then
+            pop(d)
+            d:GetPropertyChangedSignal("Visible"):Connect(function()
+                if d.Visible then pop(d) end
+            end)
+        elseif d:IsA("UIGradient") and d.Parent:IsA("Frame") and d.Parent.Size.Y.Offset == 1.5 then
+            d.Offset = Vector2.new(-0.5, 0)
+            TweenService:Create(d, TweenInfo.new(2, Enum.EasingStyle.Sine, Enum.EasingDirection.InOut, -1, true),
+                {Offset = Vector2.new(0.5, 0)}):Play()
+        end
+    end
+
+    local roots = {}
+    pcall(function() if gethui then table.insert(roots, gethui()) end end)
+    pcall(function() table.insert(roots, game:GetService("CoreGui")) end)
+    pcall(function() table.insert(roots, player:WaitForChild("PlayerGui", 5)) end)
+    for _, r in ipairs(roots) do
+        pcall(function() r.DescendantAdded:Connect(handle) end)
+    end
 end
 
 -- =========================================================
@@ -480,7 +632,7 @@ local function buildImporter(host, ctx)
         LOGO = "rbxassetid://133871331523241",
     }
 
-    -- palet disamakan dengan toolbox (ungu)
+    -- palet disamakan dengan toolbox
     local C = {
         surface = TC.panel, surface2 = TC.input, line = TC.stroke,
         a1 = Color3.fromRGB(226, 222, 250), a2 = TC.cyan,
