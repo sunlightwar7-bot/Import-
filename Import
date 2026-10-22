@@ -3,7 +3,7 @@
 --   Tab IMPORT FILE : import file .rbxm / .rbxmx / .rbxl / .rbxlx dari workspace executor
 --   Akses           : key (terikat username + masa aktif) atau trial gratis 1 hari per akun
 --   Pembuat key     : BalereotKeyManager.lua (script terpisah, khusus owner)
---   TEMA            : Midnight Sapphire (premium) + animasi tombol
+--   TEMA            : Royal Gold (premium) + tombol 3D + animasi buka/tutup
 
 local Players = game:GetService("Players")
 local TweenService = game:GetService("TweenService")
@@ -64,16 +64,16 @@ local BG_ASSET_ID = 102728536712814   -- ID gambar logo BALEREOT COMMUNITY
 local BG_URL = nil            -- atau link langsung (raw) ke file PNG, contoh dari GitHub
 local BG_TRANSPARENCY = 0.6   -- 0 = jelas, 1 = hilang
 
--- PALET PREMIUM: Midnight Sapphire + Aqua + Gold
+-- PALET PREMIUM: Royal Gold (obsidian + emas)
 local C = {
-    bg = Color3.fromRGB(7, 9, 18), panel = Color3.fromRGB(15, 18, 34),
-    header = Color3.fromRGB(10, 12, 24), input = Color3.fromRGB(21, 25, 46),
-    stroke = Color3.fromRGB(52, 62, 120), accent = Color3.fromRGB(92, 92, 255),
-    accent2 = Color3.fromRGB(120, 240, 225), cyan = Color3.fromRGB(60, 200, 255),
-    text = Color3.fromRGB(236, 240, 255), sub = Color3.fromRGB(146, 158, 200),
-    dim = Color3.fromRGB(86, 96, 140), green = Color3.fromRGB(70, 235, 160),
-    red = Color3.fromRGB(255, 86, 110), yellow = Color3.fromRGB(255, 200, 80),
-    white = Color3.new(1, 1, 1),
+    bg = Color3.fromRGB(9, 8, 11), panel = Color3.fromRGB(22, 19, 26),
+    header = Color3.fromRGB(14, 12, 17), input = Color3.fromRGB(30, 26, 34),
+    stroke = Color3.fromRGB(110, 86, 40), accent = Color3.fromRGB(236, 186, 74),
+    accent2 = Color3.fromRGB(255, 232, 170), cyan = Color3.fromRGB(255, 142, 72),
+    text = Color3.fromRGB(248, 242, 230), sub = Color3.fromRGB(176, 164, 142),
+    dim = Color3.fromRGB(112, 104, 90), green = Color3.fromRGB(90, 228, 150),
+    red = Color3.fromRGB(238, 82, 92), yellow = Color3.fromRGB(255, 208, 96),
+    white = Color3.new(1, 1, 1), ink = Color3.fromRGB(28, 18, 4),
 }
 
 local function new(class, props, parent)
@@ -113,49 +113,6 @@ do
         return math.round(c.R * 255) .. "," .. math.round(c.G * 255) .. "," .. math.round(c.B * 255)
     end
 
-    -- warna lama (hardcode) -> warna baru
-    local MAP = {
-        ["30,12,52"]    = Color3.fromRGB(18, 22, 52),
-        ["14,6,26"]     = Color3.fromRGB(9, 11, 26),
-        ["4,2,10"]      = Color3.fromRGB(4, 5, 14),
-        ["34,14,60"]    = Color3.fromRGB(24, 28, 64),
-        ["12,6,22"]     = Color3.fromRGB(8, 10, 22),
-        ["190,110,255"] = Color3.fromRGB(120, 150, 255),
-        ["190,190,210"] = Color3.fromRGB(120, 235, 225),
-        ["10,6,20"]     = Color3.fromRGB(7, 9, 20),
-        ["90,48,150"]   = Color3.fromRGB(44, 50, 150),
-        ["226,222,250"] = Color3.fromRGB(190, 220, 255),
-        ["248,249,255"] = Color3.fromRGB(240, 246, 255),
-        ["172,183,238"] = Color3.fromRGB(130, 170, 255),
-    }
-
-    local function recolor(d)
-        pcall(function()
-            if d:IsA("GuiObject") then
-                local n = MAP[key(d.BackgroundColor3)]
-                if n then d.BackgroundColor3 = n end
-                if d:IsA("TextLabel") or d:IsA("TextButton") or d:IsA("TextBox") then
-                    n = MAP[key(d.TextColor3)]
-                    if n then d.TextColor3 = n end
-                elseif d:IsA("ImageLabel") or d:IsA("ImageButton") then
-                    n = MAP[key(d.ImageColor3)]
-                    if n then d.ImageColor3 = n end
-                end
-            elseif d:IsA("UIStroke") then
-                local n = MAP[key(d.Color)]
-                if n then d.Color = n end
-            elseif d:IsA("UIGradient") then
-                local list, changed = {}, false
-                for i, k in ipairs(d.Color.Keypoints) do
-                    local n = MAP[key(k.Value)]
-                    if n then changed = true end
-                    list[i] = ColorSequenceKeypoint.new(k.Time, n or k.Value)
-                end
-                if changed then d.Color = ColorSequence.new(list) end
-            end
-        end)
-    end
-
     local function ripple(b, input)
         if b.BackgroundTransparency > 0.9 then return end
         local inset = GuiService:GetGuiInset()
@@ -185,23 +142,98 @@ do
         return i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch
     end
 
+    local function shade(c, f) return Color3.new(c.R * f, c.G * f, c.B * f) end
+
+    -- tampilan 3D: kilau atas, bayangan bawah, garis highlight, bibir tebal di dasar
+    local function bevel(b)
+        if b.Name:sub(1, 5) == "Btn3D" then return nil end
+        if b.Size == UDim2.new() or b.Size.Y.Offset > 60 then return nil end
+        local cr = b:FindFirstChildOfClass("UICorner")
+        local rad = cr and cr.CornerRadius.Offset or 6
+        local els = {}
+        local function mk(props)
+            local f = Instance.new("Frame")
+            f.BorderSizePixel = 0
+            f.Active = false
+            f.ZIndex = b.ZIndex + 1
+            for k, v in pairs(props) do f[k] = v end
+            f.Parent = b
+            els[#els + 1] = f
+            return f
+        end
+        local sheen = mk({Name = "FX3D_Sheen", Size = UDim2.fromScale(1, 1), BackgroundColor3 = Color3.new(1, 1, 1), BackgroundTransparency = 0.82})
+        if cr then
+            local c2 = Instance.new("UICorner")
+            c2.CornerRadius = cr.CornerRadius
+            c2.Parent = sheen
+        end
+        local g = Instance.new("UIGradient")
+        g.Color = ColorSequence.new(Color3.new(1, 1, 1), Color3.new(0, 0, 0))
+        g.Rotation = 90
+        g.Parent = sheen
+        mk({Name = "FX3D_Hi", Size = UDim2.new(1, -rad * 1.5, 0, 1), Position = UDim2.new(0, rad * 0.75, 0, 1),
+            BackgroundColor3 = Color3.new(1, 1, 1), BackgroundTransparency = 0.45})
+        local lip = mk({Name = "FX3D_Lip", Size = UDim2.new(1, -rad, 0, 3), Position = UDim2.new(0, rad / 2, 1, -3),
+            BackgroundColor3 = shade(b.BackgroundColor3, 0.45), BackgroundTransparency = 0.05, ZIndex = b.ZIndex + 2})
+        local lc = Instance.new("UICorner")
+        lc.CornerRadius = UDim.new(0, 2)
+        lc.Parent = lip
+        local st
+        if not b:FindFirstChildOfClass("UIStroke") then
+            st = Instance.new("UIStroke")
+            st.Thickness = 1.2
+            st.Transparency = 0.45
+            st.Color = Color3.new(1, 1, 1)
+            st.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+            local sg = Instance.new("UIGradient")
+            sg.Color = ColorSequence.new(Color3.new(1, 1, 1), Color3.fromRGB(40, 40, 40))
+            sg.Rotation = 90
+            sg.Parent = st
+            st.Parent = b
+        end
+        local function sync()
+            local on = b.BackgroundTransparency < 0.5
+            for _, e in ipairs(els) do e.Visible = on end
+            if st then st.Enabled = on end
+        end
+        sync()
+        b:GetPropertyChangedSignal("BackgroundTransparency"):Connect(sync)
+        b:GetPropertyChangedSignal("BackgroundColor3"):Connect(function()
+            lip.BackgroundColor3 = shade(b.BackgroundColor3, 0.45)
+        end)
+        return lip, sheen, rad
+    end
+
     local function attach(b)
         if b:GetAttribute("FX") then return end
         if b.Size.X.Scale >= 1 and b.Size.Y.Scale >= 1 then return end -- overlay layar penuh
         b:SetAttribute("FX", true)
         local sc = Instance.new("UIScale")
         sc.Parent = b
+        local lip, sheen, rad
+        task.defer(function()
+            if b.Parent then lip, sheen, rad = bevel(b) end
+        end)
         local function go(s, t, style)
             TweenService:Create(sc, TweenInfo.new(t, style or Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {Scale = s}):Play()
+        end
+        local function lipTo(down)
+            if not lip then return end
+            local h = down and 1 or 3
+            TweenService:Create(lip, TweenInfo.new(0.07, Enum.EasingStyle.Quad), {
+                Size = UDim2.new(1, -rad, 0, h), Position = UDim2.new(0, rad / 2, 1, -h),
+            }):Play()
+            TweenService:Create(sheen, TweenInfo.new(0.07), {BackgroundTransparency = down and 0.7 or 0.82}):Play()
         end
         local function big() return b.AbsoluteSize.X > 140 end
         local down = false
         b.MouseEnter:Connect(function() go(big() and 1.015 or 1.06, 0.15) end)
-        b.MouseLeave:Connect(function() down = false; go(1, 0.2) end)
+        b.MouseLeave:Connect(function() down = false; go(1, 0.2); lipTo(false) end)
         b.InputBegan:Connect(function(i)
             if isPress(i) then
                 down = true
                 go(big() and 0.97 or 0.88, 0.07)
+                lipTo(true)
                 ripple(b, i)
             end
         end)
@@ -209,6 +241,7 @@ do
             if down and isPress(i) then
                 down = false
                 go(1, 0.45, Enum.EasingStyle.Back)
+                lipTo(false)
             end
         end)
     end
@@ -224,10 +257,9 @@ do
     local function handle(d)
         local g = d:FindFirstAncestorWhichIsA("ScreenGui")
         if not (g and (g.Name == "BalereotKey" or g.Name == "BalereotCommunity")) then return end
-        recolor(d)
         if d:IsA("TextButton") then
             attach(d)
-        elseif d:IsA("Frame") and d.Active and d.Parent:IsA("ScreenGui") then
+        elseif d:IsA("Frame") and d.Active and d.Parent:IsA("ScreenGui") and d.Name ~= "BalereotMain" then
             pop(d)
             d:GetPropertyChangedSignal("Visible"):Connect(function()
                 if d.Visible then pop(d) end
@@ -451,11 +483,9 @@ end
 -- hasil akses (dipakai panel setelah lolos)
 local accessTag, accessInfo, accessExpiry = "KEY", "", nil
 local function describeKey(info)
-    if info.expires == math.huge then
-        accessTag, accessInfo, accessExpiry = "PERMANEN", "Key permanen aktif", nil
-    else
-        accessTag, accessInfo, accessExpiry = "KEY", "Key aktif, sisa " .. fmtDur(info.expires - nowTs()), info.expires
-    end
+    -- user yang terdaftar di key.txt = PREMIUM (waktu tidak ditampilkan)
+    accessTag, accessInfo = "PREMIUM", "Premium aktif"
+    accessExpiry = (info.expires ~= math.huge) and info.expires or nil -- tetap menutup panel saat key habis
 end
 
 local function requireKey()
@@ -513,6 +543,7 @@ local function requireKey()
         return b
     end
     local checkBtn = makeBtn("CHECK KEY", 134, C.accent)
+    checkBtn.TextColor3 = C.ink
     local trialUsable = (tState == "fresh" or tState == "active")
     local trialBtn = makeBtn(trialLabel(tState, tLeft), 178, trialUsable and Color3.fromRGB(34, 120, 82) or C.input)
     trialBtn.TextSize = 11
@@ -635,8 +666,8 @@ local function buildImporter(host, ctx)
     -- palet disamakan dengan toolbox
     local C = {
         surface = TC.panel, surface2 = TC.input, line = TC.stroke,
-        a1 = Color3.fromRGB(226, 222, 250), a2 = TC.cyan,
-        text = TC.text, muted = TC.sub, ink = Color3.fromRGB(14, 6, 26),
+        a1 = Color3.fromRGB(255, 232, 170), a2 = TC.cyan,
+        text = TC.text, muted = TC.sub, ink = TC.ink or Color3.fromRGB(28, 18, 4),
         ok = TC.green, err = TC.red,
     }
     local WHITE = Color3.new(1, 1, 1)
@@ -687,18 +718,18 @@ local function buildImporter(host, ctx)
     end
 
     -- Tombol 3D: sisi bawah (depth) + permukaan yang turun saat ditekan.
-    local DEPTH_COL = Color3.fromRGB(90, 48, 150)
+    local DEPTH_COL = Color3.fromRGB(150, 100, 26)
     local function gradButton(parent, text, pos, size, textSize)
         local LIP = 3
         local b = new("TextButton", {
-            Position = pos, Size = size, BackgroundTransparency = 1, Text = "",
+            Name = "Btn3D", Position = pos, Size = size, BackgroundTransparency = 1, Text = "",
             AutoButtonColor = false, BorderSizePixel = 0,
         }, parent)
         local depth = new("Frame", {Size = UDim2.fromScale(1, 1), BackgroundColor3 = DEPTH_COL, BorderSizePixel = 0}, b)
         corner(depth, 9)
         local face = new("Frame", {Size = UDim2.new(1, 0, 1, -LIP), BackgroundColor3 = WHITE, BorderSizePixel = 0, ZIndex = 2}, b)
         corner(face, 9)
-        gradient(face, Color3.fromRGB(248, 249, 255), Color3.fromRGB(172, 183, 238), 90)
+        gradient(face, Color3.fromRGB(255, 242, 196), Color3.fromRGB(230, 176, 66), 90)
         local st = stroke(face, WHITE, 0.45, 1)
         new("Frame", {
             Size = UDim2.new(1, -14, 0, 1), Position = UDim2.fromOffset(7, 1), BackgroundColor3 = WHITE,
@@ -752,7 +783,7 @@ local function buildImporter(host, ctx)
         for n, t in pairs(tabs) do
             local on = (n == name)
             t.BackgroundColor3 = on and TC.accent or TC.input
-            t.TextColor3 = on and WHITE or TC.sub
+            t.TextColor3 = on and TC.ink or TC.sub
         end
     end
     local tabRow = new("Frame", {Size = UDim2.new(1, -16, 0, 26), Position = UDim2.fromOffset(8, TOP), BackgroundTransparency = 1}, host)
@@ -846,7 +877,7 @@ local function buildImporter(host, ctx)
         corner(b, 12)
         local lb = new("TextLabel", {
             Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Text = nmk, Font = Enum.Font.GothamBold,
-            TextSize = 9, TextColor3 = (i == 1) and WHITE or C.text,
+            TextSize = 9, TextColor3 = (i == 1) and C.ink or C.text,
         }, b)
         segBtns[nmk] = {btn = b, lbl = lb}
     end
@@ -856,7 +887,7 @@ local function buildImporter(host, ctx)
         Text = "", AutoButtonColor = false, BorderSizePixel = 0,
     }, lib)
     corner(rescan, 15)
-    gradient(rescan, Color3.fromRGB(248, 249, 255), Color3.fromRGB(172, 183, 238), 90)
+    gradient(rescan, Color3.fromRGB(255, 242, 196), Color3.fromRGB(230, 176, 66), 90)
     local rescanIcon = new("ImageLabel", {
         Size = UDim2.fromOffset(16, 16), Position = UDim2.fromScale(0.5, 0.5), AnchorPoint = Vector2.new(0.5, 0.5),
         BackgroundTransparency = 1, Image = ICON.REFRESH, ImageColor3 = C.ink,
@@ -898,7 +929,7 @@ local function buildImporter(host, ctx)
             for n2, s2 in pairs(segBtns) do
                 local on = (n2 == nmk)
                 tween(s2.btn, 0.2, {BackgroundTransparency = on and 0 or 1})
-                s2.lbl.TextColor3 = on and WHITE or C.text
+                s2.lbl.TextColor3 = on and C.ink or C.text
             end
             applyFilter()
         end)
@@ -920,7 +951,7 @@ local function buildImporter(host, ctx)
     new("UIListLayout", {Padding = UDim.new(0, 4)}, scList)
 
     local codeBox = new("TextBox", {
-        Size = UDim2.new(1, -124, 1, -36), Position = UDim2.fromOffset(124, 0), BackgroundColor3 = Color3.fromRGB(10, 6, 20), BackgroundTransparency = 0.1, BorderSizePixel = 0,
+        Size = UDim2.new(1, -124, 1, -36), Position = UDim2.fromOffset(124, 0), BackgroundColor3 = Color3.fromRGB(11, 10, 9), BackgroundTransparency = 0.1, BorderSizePixel = 0,
         Text = "Import file dulu, lalu pilih script di kiri.", TextColor3 = C.text, Font = Enum.Font.Code, TextSize = 10,
         TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top,
         ClearTextOnFocus = false, TextEditable = false, MultiLine = true, TextWrapped = false, ClipsDescendants = true,
@@ -1869,15 +1900,52 @@ if not okParent or not gui.Parent then gui.Parent = player:WaitForChild("PlayerG
 
 -- Jendela utama
 local main = new("Frame", {
-    AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5),
+    Name = "BalereotMain", AnchorPoint = Vector2.new(0.5, 0.5), Position = UDim2.fromScale(0.5, 0.5),
     BackgroundColor3 = C.bg, BorderSizePixel = 0, Active = true, Draggable = true,
     ClipsDescendants = true,
 }, gui)
 round(main, 14)
 new("UISizeConstraint", {MaxSize = Vector2.new(420, 9999), MinSize = Vector2.new(280, 394)}, main)
-gradient(main, {{0, Color3.fromRGB(30, 12, 52)}, {0.5, Color3.fromRGB(14, 6, 26)}, {1, Color3.fromRGB(4, 2, 10)}}, 90)
+gradient(main, {{0, Color3.fromRGB(34, 26, 14)}, {0.5, Color3.fromRGB(14, 12, 13)}, {1, Color3.fromRGB(5, 5, 7)}}, 90)
 local mainStroke = stroke(main, C.stroke, 3)
 spin(gradient(mainStroke, {{0, C.accent}, {0.25, C.cyan}, {0.5, Color3.fromRGB(255, 255, 255)}, {0.75, C.accent2}, {1, C.accent}}), 4)
+
+-- Cahaya emas lembut di bagian atas jendela
+local topGlow = new("Frame", {Name = "TopGlow", Size = UDim2.new(1, 0, 0, 130), BackgroundColor3 = C.accent, BorderSizePixel = 0, ZIndex = 1}, main)
+new("UIGradient", {Color = ColorSequence.new(C.accent), Rotation = 90,
+    Transparency = NumberSequence.new({NumberSequenceKeypoint.new(0, 0.8), NumberSequenceKeypoint.new(1, 1)})}, topGlow)
+
+-- Animasi buka / tutup jendela (slide + zoom memantul + kilatan border)
+local mainScale = new("UIScale", {Name = "FXMainScale", Scale = 1}, main)
+local restPos = main.Position
+local closing = false
+local function openMain()
+    if closing or main.Visible then return end
+    main.Position = restPos + UDim2.fromOffset(0, 60)
+    mainScale.Scale = 0.72
+    mainStroke.Thickness = 8
+    main.Visible = true
+    TweenService:Create(mainScale, TweenInfo.new(0.6, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {Scale = 1}):Play()
+    TweenService:Create(main, TweenInfo.new(0.6, Enum.EasingStyle.Quint, Enum.EasingDirection.Out), {Position = restPos}):Play()
+    TweenService:Create(mainStroke, TweenInfo.new(0.8, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {Thickness = 3}):Play()
+end
+local function closeMain()
+    if closing or not main.Visible then return end
+    closing = true
+    restPos = main.Position
+    TweenService:Create(mainScale, TweenInfo.new(0.25, Enum.EasingStyle.Back, Enum.EasingDirection.In), {Scale = 0.6}):Play()
+    TweenService:Create(main, TweenInfo.new(0.25, Enum.EasingStyle.Quad, Enum.EasingDirection.In), {Position = restPos + UDim2.fromOffset(0, 50)}):Play()
+    task.delay(0.27, function()
+        main.Visible = false
+        mainScale.Scale = 1
+        main.Position = restPos
+        closing = false
+    end)
+end
+local function toggleMain()
+    if closing then return end
+    if main.Visible then closeMain() else openMain() end
+end
 
 -- Background gambar (logo)
 local bg = new("ImageLabel", {
@@ -1910,12 +1978,12 @@ local toggleBtn = new("TextButton", {
     Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Text = "BC",
     TextSize = 14, Font = Enum.Font.GothamBold, TextColor3 = C.white, ZIndex = 101,
 }, toggleBox)
-toggleBtn.MouseButton1Click:Connect(function() main.Visible = not main.Visible end)
+toggleBtn.MouseButton1Click:Connect(toggleMain)
 
 -- Header
 local header = new("Frame", {Size = UDim2.new(1, 0, 0, 42), BackgroundColor3 = C.header, BorderSizePixel = 0, ZIndex = 3}, main)
 round(header, 14)
-gradient(header, {{0, Color3.fromRGB(34, 14, 60)}, {1, Color3.fromRGB(12, 6, 22)}}, 90)
+gradient(header, {{0, Color3.fromRGB(40, 31, 16)}, {1, Color3.fromRGB(12, 11, 13)}}, 90)
 local line = new("Frame", {Size = UDim2.new(1, 0, 0, 1.5), Position = UDim2.new(0, 0, 1, -1.5), BorderSizePixel = 0, BackgroundColor3 = C.white, ZIndex = 5}, header)
 gradient(line, {{0, C.accent}, {0.5, C.cyan}, {1, C.accent2}})
 local title = new("TextLabel", {
@@ -1923,16 +1991,27 @@ local title = new("TextLabel", {
     Text = "BALEREOT COMMUNITY", TextSize = 12, Font = Enum.Font.Arcade, TextColor3 = C.white,
     TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 4,
 }, header)
-gradient(title, {{0, Color3.fromRGB(190, 110, 255)}, {0.5, Color3.fromRGB(255, 255, 255)}, {1, Color3.fromRGB(190, 190, 210)}}, 15)
+gradient(title, {{0, Color3.fromRGB(255, 214, 120)}, {0.5, Color3.fromRGB(255, 250, 235)}, {1, Color3.fromRGB(214, 168, 80)}}, 15)
 
-local right = new("Frame", {AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -10, 0.5, 0), Size = UDim2.fromOffset(100, 24), BackgroundTransparency = 1, ZIndex = 4}, header)
+local right = new("Frame", {AnchorPoint = Vector2.new(1, 0.5), Position = UDim2.new(1, -10, 0.5, 0), Size = UDim2.fromOffset(140, 24), BackgroundTransparency = 1, ZIndex = 4}, header)
 new("UIListLayout", {FillDirection = Enum.FillDirection.Horizontal, HorizontalAlignment = Enum.HorizontalAlignment.Right, VerticalAlignment = Enum.VerticalAlignment.Center, Padding = UDim.new(0, 6), SortOrder = Enum.SortOrder.LayoutOrder}, right)
-local online = new("Frame", {LayoutOrder = 1, Size = UDim2.fromOffset(58, 20), BackgroundColor3 = Color3.fromRGB(14, 44, 36), BorderSizePixel = 0, ZIndex = 4}, right)
-round(online, 10)
-new("TextLabel", {Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Text = accessTag, Font = Enum.Font.GothamBold, TextSize = 8, TextColor3 = Color3.fromRGB(170, 255, 210)}, online)
+local isPremium = (accessTag == "PREMIUM")
+local online = new("Frame", {LayoutOrder = 1, Size = UDim2.fromOffset(isPremium and 96 or 58, 22), BackgroundColor3 = isPremium and C.white or C.input, BorderSizePixel = 0, ZIndex = 4}, right)
+round(online, 11)
+if isPremium then
+    -- badge emas dengan kilau yang menyapu
+    local pg = gradient(online, {{0, Color3.fromRGB(176, 116, 30)}, {0.4, Color3.fromRGB(255, 220, 125)}, {0.5, Color3.fromRGB(255, 250, 220)}, {0.6, Color3.fromRGB(255, 220, 125)}, {1, Color3.fromRGB(176, 116, 30)}}, 20)
+    pg.Offset = Vector2.new(-1, 0)
+    TweenService:Create(pg, TweenInfo.new(2.2, Enum.EasingStyle.Linear, Enum.EasingDirection.Out, -1), {Offset = Vector2.new(1, 0)}):Play()
+    stroke(online, Color3.fromRGB(255, 238, 180), 1.2, 0.15)
+    new("TextLabel", {Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Text = "* PREMIUM *", Font = Enum.Font.GothamBold, TextSize = 9, TextColor3 = C.ink, ZIndex = 5}, online)
+else
+    stroke(online, C.stroke, 1, 0.4)
+    new("TextLabel", {Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Text = accessTag, Font = Enum.Font.GothamBold, TextSize = 8, TextColor3 = C.accent2, ZIndex = 5}, online)
+end
 local closeBtn = new("TextButton", {LayoutOrder = 2, Size = UDim2.fromOffset(26, 24), BackgroundColor3 = C.red, Text = "X", TextColor3 = C.white, TextSize = 11, Font = Enum.Font.GothamBold, BorderSizePixel = 0, ZIndex = 4}, right)
 round(closeBtn, 6)
-closeBtn.MouseButton1Click:Connect(function() main.Visible = false end)
+closeBtn.MouseButton1Click:Connect(closeMain)
 
 -- Pilihan panel: TOOLBOX / IMPORT FILE
 local TB_OFF = 28   -- tinggi tambahan untuk bar pilihan panel
@@ -1947,7 +2026,7 @@ local function setMode(name)
     impView.Visible = (name == "Import")
     for n, b in pairs(modeButtons) do
         b.BackgroundColor3 = (n == name) and C.accent or C.input
-        b.TextColor3 = (n == name) and C.white or C.sub
+        b.TextColor3 = (n == name) and C.ink or C.sub
     end
     if name == "Import" and onImportOpen then
         local f = onImportOpen
@@ -1979,7 +2058,7 @@ searchBox.Focused:Connect(function() searchStroke.Color = C.accent; searchStroke
 searchBox.FocusLost:Connect(function() searchStroke.Color = C.stroke; searchStroke.Transparency = 0.5 end)
 local searchBtn = new("TextButton", {
     Size = UDim2.fromOffset(58, 30), Position = UDim2.new(1, -5, 0.5, -15), AnchorPoint = Vector2.new(1, 0),
-    BackgroundColor3 = C.accent, Text = "SEARCH", TextColor3 = C.white, TextSize = 8.5,
+    BackgroundColor3 = C.accent, Text = "SEARCH", TextColor3 = C.ink, TextSize = 8.5,
     Font = Enum.Font.GothamBold, BorderSizePixel = 0, ZIndex = 4,
 }, searchBar)
 round(searchBtn, 6)
@@ -2177,7 +2256,7 @@ local pname = new("TextLabel", {Size = UDim2.new(1, -24, 0, 20), Position = UDim
 local pby = new("TextLabel", {Size = UDim2.new(1, -24, 0, 16), Position = UDim2.fromOffset(12, 278), BackgroundTransparency = 1, Text = "", TextColor3 = C.sub, Font = Enum.Font.GothamMedium, TextSize = 10}, pcard)
 local pinsert = new("TextButton", {
     AnchorPoint = Vector2.new(0.5, 1), Position = UDim2.new(0.5, 0, 1, -12), Size = UDim2.new(1, -24, 0, 36),
-    BackgroundColor3 = C.accent, Text = "INSERT ASSET", TextColor3 = C.white, TextSize = 11,
+    BackgroundColor3 = C.accent, Text = "INSERT ASSET", TextColor3 = C.ink, TextSize = 11,
     Font = Enum.Font.GothamBold, BorderSizePixel = 0, AutoButtonColor = true,
 }, pcard)
 round(pinsert, 8)
@@ -2241,7 +2320,9 @@ local function addCard(item)
     order += 1
     local card = new("TextButton", {Text = "", AutoButtonColor = false, BackgroundColor3 = C.panel, BorderSizePixel = 0, LayoutOrder = order}, results)
     round(card, 10)
-    stroke(card, C.stroke, 1, 0.5)
+    local cst = stroke(card, C.stroke, 1, 0.5)
+    card.MouseEnter:Connect(function() TweenService:Create(cst, TweenInfo.new(0.15), {Color = C.accent, Transparency = 0}):Play() end)
+    card.MouseLeave:Connect(function() TweenService:Create(cst, TweenInfo.new(0.15), {Color = C.stroke, Transparency = 0.5}):Play() end)
     local tf = new("Frame", {Size = UDim2.new(1, -12, 0, 100), Position = UDim2.fromOffset(6, 6), BackgroundColor3 = C.input, BorderSizePixel = 0, ClipsDescendants = true}, card)
     round(tf, 8)
     local img = new("ImageLabel", {Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, ScaleType = Enum.ScaleType.Fit}, tf)
@@ -2251,7 +2332,7 @@ local function addCard(item)
     new("TextLabel", {Size = UDim2.new(1, -12, 0, 16), Position = UDim2.fromOffset(6, 110), BackgroundTransparency = 1, Text = tostring(item.name), TextColor3 = C.text, Font = Enum.Font.GothamBold, TextSize = 10, TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd}, card)
     new("TextLabel", {Size = UDim2.new(1, -12, 0, 12), Position = UDim2.fromOffset(6, 126), BackgroundTransparency = 1, Text = "by " .. tostring(item.creator), TextColor3 = C.sub, Font = Enum.Font.Gotham, TextSize = 9, TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd}, card)
 
-    local ins = new("TextButton", {Size = UDim2.new(1, -42, 0, 18), Position = UDim2.fromOffset(6, 142), BackgroundColor3 = C.accent, Text = "INSERT", TextColor3 = C.white, Font = Enum.Font.GothamBold, TextSize = 9, BorderSizePixel = 0}, card)
+    local ins = new("TextButton", {Size = UDim2.new(1, -42, 0, 18), Position = UDim2.fromOffset(6, 142), BackgroundColor3 = C.accent, Text = "INSERT", TextColor3 = C.ink, Font = Enum.Font.GothamBold, TextSize = 9, BorderSizePixel = 0}, card)
     round(ins, 5)
     local fav = new("TextButton", {Size = UDim2.fromOffset(28, 18), Position = UDim2.new(1, -34, 0, 142), BackgroundColor3 = C.input, Text = favIndex(item.id) and "*" or "+", TextColor3 = C.accent2, Font = Enum.Font.GothamBold, TextSize = 13, BorderSizePixel = 0}, card)
     round(fav, 5)
@@ -2407,7 +2488,7 @@ local function setTab(name)
     currentTab = name
     for n, b in pairs(tabButtons) do
         b.BackgroundColor3 = (n == name) and C.accent or C.input
-        b.TextColor3 = (n == name) and C.white or C.sub
+        b.TextColor3 = (n == name) and C.ink or C.sub
     end
     audioPages, httpCursor = nil, nil
     if name == "Favorites" then
@@ -2448,8 +2529,11 @@ end
 setMode("Toolbox")
 
 UIS.InputBegan:Connect(function(input, processed)
-    if not processed and input.KeyCode == Enum.KeyCode.RightShift then main.Visible = not main.Visible end
+    if not processed and input.KeyCode == Enum.KeyCode.RightShift then toggleMain() end
 end)
+
+main.Visible = false
+openMain()
 
 log("BALEREOT COMMUNITY READY", C.green)
 log("Klik BC (atau RightShift) untuk show/hide", C.sub)
