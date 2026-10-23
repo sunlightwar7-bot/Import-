@@ -28,7 +28,7 @@ local UIS = game:GetService("UserInputService")
 -- (tanpa garis miring di akhir)
 -- =====================================================================
 local CHECK_URL = "https://GANTI-DENGAN-ALAMAT-WORKER-MU.workers.dev"  -- <<< alamat Worker
-local KEY_LIST_URL = ""   -- <<< CADANGAN tanpa Worker: link RAW key.txt (contoh: https://raw.githubusercontent.com/USER/REPO/main/key.txt)
+local KEY_LIST_URL = "https://raw.githubusercontent.com/sunlightwar7-bot/Import-/refs/heads/main/key.txt"   -- <<< CADANGAN tanpa Worker: link RAW key.txt (contoh: https://raw.githubusercontent.com/USER/REPO/main/key.txt)
                           --     Dipakai hanya kalau CHECK_URL belum diisi. Kurang aman dibanding Worker (daftar key bisa dibuka orang).
 local KEY_FILE = "balereot_key.txt"           -- key tersimpan agar tidak input ulang
 local GET_KEY_LINK = "https://discord.gg/HAkGRPayDn"  -- link tombol GET KEY (otomatis buka Discord)
