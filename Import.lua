@@ -1,7 +1,7 @@
 -- BALEREOT COMMUNITY  |  Toolbox + Asset Importer (satu panel)
 --   Tab TOOLBOX     : cari & insert Model / Texture / Decal / Audio lewat Studio Lite
 --   Tab IMPORT FILE : import file .rbxm / .rbxmx / .rbxl / .rbxlx dari workspace executor
---   Tab TOOLS       : SCRIPT LIBRARY (snippet siap pakai) + SCANNER script berbahaya (auto-scan saat insert model)
+--   Tab TOOLS       : SCRIPT LIBRARY (snippet siap pakai) + OPTIMIZER (ringankan part tanpa mengubah tampilan, bisa UNDO)
 --   Akses           : key (Worker ATAU key.txt via KEY_LIST_URL, terikat akun + masa aktif) atau trial gratis 1 hari per akun
 --   Pembuat key     : BalereotKeyManager.lua (script terpisah, khusus owner)
 --   TEMA            : Royal Gold (premium) + tombol 3D + animasi buka/tutup
@@ -2206,7 +2206,6 @@ local function setMode(name)
     tbView.Visible = (name == "Toolbox")
     impView.Visible = (name == "Import")
     toolsView.Visible = (name == "Tools")
-    if name == "Tools" and modeButtons.Tools then modeButtons.Tools.Text = "TOOLS" end
     for n, b in pairs(modeButtons) do
         b.BackgroundColor3 = (n == name) and C.accent or C.input
         b.TextColor3 = (n == name) and C.ink or C.sub
@@ -2315,92 +2314,70 @@ camera:GetPropertyChangedSignal("ViewportSize"):Connect(layout)
 layout()
 
 -- =========================================================
--- SCANNER SCRIPT BERBAHAYA (inti pemindai)
---   Memeriksa Script / LocalScript / ModuleScript di dalam model:
---   require(ID), loadstring, getfenv, HTTP keluar, obfuscation, dll.
+-- OPTIMIZER (inti): kurangi beban part TANPA mengganti bentuk/warna/ukuran
+--   Semua perubahan dicatat di Optimizer.undo supaya bisa dibatalkan.
 -- =========================================================
-local Scanner = {autoScan = true, onResult = nil, last = nil}
-
-local SCAN_RULES = {
-    {label = "require(ID) memuat modul luar", w = 5, pats = {"require%s*%(%s*%-?%d%d%d%d+"}},
-    {label = "require(ID) lewat variabel/angka", w = 3, pats = {"require%s*%(%s*tonumber", "require%s*%(%s*game:GetService%(\"InsertService\"%)"}},
-    {label = "loadstring (menjalankan kode dinamis)", w = 5, pats = {"loadstring"}},
-    {label = "getfenv / setfenv", w = 4, pats = {"getfenv", "setfenv"}},
-    {label = "HTTP keluar (kirim/ambil data)", w = 4, all = {"HttpService"}, pats = {"GetAsync", "PostAsync", "RequestAsync"}},
-    {label = "InsertService:LoadAsset (muat aset luar)", w = 4, pats = {"InsertService%s*:%s*LoadAsset", ":%s*LoadAssetVersion"}},
-    {label = "Shutdown server", w = 5, pats = {"game%s*:%s*Shutdown", "game%.Shutdown"}},
-    {label = "ClearAllChildren (hapus massal)", w = 4, pats = {"ClearAllChildren"}},
-    {label = "Kick pemain", w = 3, pats = {":%s*Kick%s*%("}},
-    {label = "Prompt pembelian (Marketplace)", w = 3, pats = {"PromptPurchase", "PromptProductPurchase", "PromptGamePassPurchase", "PromptPremiumPurchase"}},
-    {label = "TeleportService (pindahkan pemain)", w = 3, pats = {"TeleportService"}},
-    {label = "Fungsi exploit di dalam model", w = 4, pats = {"hookfunction", "newcclosure", "getrawmetatable", "setrawmetatable", "sethiddenproperty", "getgenv", "syn%.request"}},
-    {label = "Obfuscation (escape desimal \\ddd)", w = 4, pats = {"\\%d%d?%d?\\%d%d?%d?\\%d%d?%d?\\%d%d?%d?\\%d%d?%d?"}},
-    {label = "Obfuscation (string.char / hex panjang)", w = 2, pats = {"string%.char%s*%(", "%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x"}},
-    {label = "Nama variabel obfuscated (lIl1Il)", w = 3, pats = {"[lI1][lI1][lI1][lI1][lI1][lI1]"}},
-    {label = "Menyembunyikan diri (Parent = nil)", w = 2, pats = {"script%.Parent%s*=%s*nil", "script%s*:%s*Destroy"}},
-    {label = "Kata kunci mencurigakan (backdoor/virus)", w = 3, pats = {"[Bb][Aa][Cc][Kk][Dd][Oo][Oo][Rr]", "[Vv][Ii][Rr][Uu][Ss]", "[Ii][Nn][Ff][Ee][Cc][Tt]"}},
+local Optimizer = {auto = false, undo = {}, last = nil}
+Optimizer.opts = {
+    anchor = true,       -- Anchored = true (part statis tidak dihitung fisika)
+    fluid = true,        -- EnableFluidForces = false
+    render = true,       -- MeshPart.RenderFidelity = Automatic (LOD)
+    lod = true,          -- Model.LevelOfDetail = Automatic
+    shadowSmall = false, -- CastShadow = false untuk part kecil
+    shadowLights = false,-- Light.Shadows = false
+    hull = false,        -- CollisionFidelity Precise/Default -> Hull
+    touch = false,       -- CanTouch = false untuk part dekorasi
+    fx = false,          -- matikan partikel / trail / beam / api / asap
 }
 
-local function stripComments(src)
-    src = src:gsub("%-%-%[%[.-%]%]", "")
-    src = src:gsub("%-%-[^\n]*", "")
-    return src
+local FX_CLASSES = {ParticleEmitter = true, Trail = true, Beam = true, Fire = true, Smoke = true, Sparkles = true}
+local LIGHT_CLASSES = {PointLight = true, SpotLight = true, SurfaceLight = true}
+
+local function setProp(o, prop, val, stats, key)
+    local ok, old = pcall(function() return o[prop] end)
+    if not ok or old == val then return false end
+    if pcall(function() o[prop] = val end) then
+        Optimizer.undo[#Optimizer.undo + 1] = {o, prop, old}
+        stats[key] = (stats[key] or 0) + 1
+        return true
+    end
+    return false
 end
 
-local function readSource(s)
-    local ok, src = pcall(function() return s.Source end)
-    if ok and type(src) == "string" and #src > 0 then return src end
-    if decompile then
-        local ok2, d = pcall(decompile, s)
-        if ok2 and type(d) == "string" and #d > 0 then return d end
-    end
-    if gethiddenproperty then
-        local ok3, v = pcall(gethiddenproperty, s, "Source")
-        if ok3 and type(v) == "string" and #v > 0 then return v end
-    end
-    return nil
-end
-
--- periksa satu script -> level ("HIGH"/"MED"/"LOW"/"UNKNOWN"/nil), skor, daftar alasan
-function Scanner.check(s)
-    local src = readSource(s)
-    if not src then return "UNKNOWN", 0, {"Source tidak bisa dibaca executor"} end
-    src = stripComments(src)
-    local score, reasons = 0, {}
-    for _, r in ipairs(SCAN_RULES) do
-        local hit = true
-        if r.all then
-            for _, p in ipairs(r.all) do
-                if not src:find(p) then hit = false break end
+-- apakah part ini mungkin bergerak / dipakai fisika (jangan di-anchor)?
+local function isDynamic(part, modelCache)
+    if part:FindFirstAncestorWhichIsA("Tool") then return true end
+    if part:IsA("VehicleSeat") then return true end
+    local m = part.Parent
+    while m and m ~= workspace and m ~= game do
+        if m:IsA("Model") then
+            local c = modelCache[m]
+            if c == nil then
+                c = (m:FindFirstChildOfClass("Humanoid") ~= nil) or (m:FindFirstChildWhichIsA("VehicleSeat", true) ~= nil)
+                modelCache[m] = c
             end
+            if c then return true end
         end
-        if hit and r.pats then
-            hit = false
-            for _, p in ipairs(r.pats) do
-                if src:find(p) then hit = true break end
-            end
-        end
-        if hit then
-            score += r.w
-            reasons[#reasons + 1] = r.label
+        m = m.Parent
+    end
+    if part:FindFirstChildWhichIsA("BodyMover") then return true end
+    local okJ, joints = pcall(function() return part:GetJoints() end)
+    if okJ then
+        for _, j in ipairs(joints) do
+            if j:IsA("Constraint") or j:IsA("Motor6D") or j:IsA("Motor") then return true end
         end
     end
-    local level
-    if score >= 5 then level = "HIGH" elseif score >= 3 then level = "MED" elseif score >= 1 then level = "LOW" end
-    return level, score, reasons
+    local okV, vel = pcall(function() return part.AssemblyLinearVelocity.Magnitude end)
+    if okV and vel > 0.5 then return true end
+    return false
 end
 
--- kumpulkan semua script dari daftar root
-function Scanner.collect(roots, gui)
+function Optimizer.collect(roots, gui)
     local list, seen = {}, {}
     local function add(o)
-        if seen[o] or not o:IsA("LuaSourceContainer") then return end
-        if gui and o:IsDescendantOf(gui) then return end
-        if o:IsDescendantOf(game:GetService("ReplicatedStorage")) then
-            local f = game:GetService("ReplicatedStorage"):FindFirstChild("StudioLiteFolder")
-            if f and o:IsDescendantOf(f) then return end
-        end
+        if seen[o] then return end
         seen[o] = true
+        if gui and o:IsDescendantOf(gui) then return end
         list[#list + 1] = o
     end
     for _, root in ipairs(roots) do
@@ -2410,7 +2387,7 @@ function Scanner.collect(roots, gui)
             if ok then
                 for i, d in ipairs(desc) do
                     add(d)
-                    if i % 1500 == 0 then task.wait() end
+                    if i % 2000 == 0 then task.wait() end
                 end
             end
         end
@@ -2418,31 +2395,73 @@ function Scanner.collect(roots, gui)
     return list
 end
 
--- pindai: kembalikan {items = {...}, total, high, med, low, unknown}
-function Scanner.scan(roots, gui, progress)
-    local scripts = Scanner.collect(roots, gui)
-    local res = {items = {}, total = #scripts, high = 0, med = 0, low = 0, unknown = 0}
-    for i, s in ipairs(scripts) do
-        local level, score, reasons = Scanner.check(s)
-        if level then
-            res.items[#res.items + 1] = {obj = s, level = level, score = score, reasons = reasons}
-            if level == "HIGH" then res.high += 1
-            elseif level == "MED" then res.med += 1
-            elseif level == "LOW" then res.low += 1
-            else res.unknown += 1 end
+function Optimizer.run(roots, gui, progress)
+    local o = Optimizer.opts
+    local stats = {parts = 0, skipped = 0}
+    local modelCache = {}
+    local objs = Optimizer.collect(roots, gui)
+    stats.total = #objs
+    for i, obj in ipairs(objs) do
+        if obj:IsA("BasePart") then
+            stats.parts += 1
+            if o.anchor and not obj.Anchored then
+                if isDynamic(obj, modelCache) then
+                    stats.skipped += 1
+                else
+                    setProp(obj, "Anchored", true, stats, "anchored")
+                end
+            end
+            if o.fluid then setProp(obj, "EnableFluidForces", false, stats, "fluid") end
+            if o.shadowSmall and obj.Size.Magnitude < 5 then setProp(obj, "CastShadow", false, stats, "shadow") end
+            if obj:IsA("MeshPart") then
+                if o.render then setProp(obj, "RenderFidelity", Enum.RenderFidelity.Automatic, stats, "render") end
+            end
+            if o.hull and (obj:IsA("MeshPart") or obj:IsA("UnionOperation")) and obj.CollisionFidelity ~= Enum.CollisionFidelity.Box
+                and obj.CollisionFidelity ~= Enum.CollisionFidelity.Hull then
+                setProp(obj, "CollisionFidelity", Enum.CollisionFidelity.Hull, stats, "hull")
+            end
+            if o.touch and not obj:FindFirstChildWhichIsA("ClickDetector") and not obj:FindFirstChildWhichIsA("ProximityPrompt")
+                and not obj:IsA("SpawnLocation") and not obj:IsA("Seat") and not obj:IsA("VehicleSeat") then
+                setProp(obj, "CanTouch", false, stats, "touch")
+            end
+        elseif obj:IsA("Model") then
+            if o.lod then setProp(obj, "LevelOfDetail", Enum.ModelLevelOfDetail.Automatic, stats, "lod") end
+        elseif o.fx and FX_CLASSES[obj.ClassName] then
+            setProp(obj, "Enabled", false, stats, "fx")
+        elseif o.shadowLights and LIGHT_CLASSES[obj.ClassName] then
+            setProp(obj, "Shadows", false, stats, "lights")
         end
-        if i % 20 == 0 then
-            if progress then progress(i, #scripts) end
+        if i % 300 == 0 then
+            if progress then progress(i, #objs) end
             task.wait()
         end
     end
-    local order = {HIGH = 1, MED = 2, LOW = 3, UNKNOWN = 4}
-    table.sort(res.items, function(a, b)
-        if order[a.level] ~= order[b.level] then return order[a.level] < order[b.level] end
-        return a.score > b.score
-    end)
-    Scanner.last = res
-    return res
+    Optimizer.last = stats
+    return stats
+end
+
+function Optimizer.undoAll()
+    local n = 0
+    for i = #Optimizer.undo, 1, -1 do
+        local u = Optimizer.undo[i]
+        if u[1] and u[1].Parent then
+            if pcall(function() u[1][u[2]] = u[3] end) then n += 1 end
+        end
+        if i % 400 == 0 then task.wait() end
+    end
+    Optimizer.undo = {}
+    return n
+end
+
+function Optimizer.summary(st)
+    local parts = {("%d part"):format(st.parts or 0)}
+    local names = {{"anchored", "anchor"}, {"fluid", "fluid"}, {"render", "LOD mesh"}, {"lod", "LOD model"}, {"shadow", "shadow"},
+        {"hull", "collision"}, {"touch", "touch"}, {"fx", "efek"}, {"lights", "shadow lampu"}}
+    for _, n in ipairs(names) do
+        if st[n[1]] then parts[#parts + 1] = st[n[1]] .. " " .. n[2] end
+    end
+    if (st.skipped or 0) > 0 then parts[#parts + 1] = st.skipped .. " dilewati (bergerak)" end
+    return table.concat(parts, " | ")
 end
 
 -- =========================================================
@@ -2535,24 +2554,16 @@ local function insertAsset(item)
     if obj:IsA("Folder") then obj:Destroy() end
     log(("OK Inserted %s (%s)"):format(tostring(item.name), result or "?"), C.green)
 
-    -- AUTO-SCAN: periksa script di dalam model yang baru di-insert
-    if Scanner.autoScan then
+    -- AUTO OPTIMIZER: ringankan model yang baru di-insert (jika diaktifkan di TOOLS)
+    if Optimizer.auto then
         task.spawn(function()
             local roots = {}
             for _, it in ipairs(items) do
                 if it.Parent then roots[#roots + 1] = it end
             end
             if #roots == 0 then return end
-            local okS, res = pcall(Scanner.scan, roots, gui)
-            if not okS or not res then return end
-            if #res.items > 0 and Scanner.onResult then pcall(Scanner.onResult, res) end
-            if res.high > 0 then
-                log("! BAHAYA: " .. res.high .. " script berbahaya di model ini (TOOLS > SCANNER)", C.red)
-            elseif res.med > 0 then
-                log("! " .. res.med .. " script curiga di model ini (TOOLS > SCANNER)", C.yellow)
-            elseif res.total > 0 then
-                log("Scan: " .. res.total .. " script, tidak ada pola berbahaya", C.green)
-            end
+            local okO, st = pcall(Optimizer.run, roots, gui)
+            if okO and st then log("Optimizer: " .. Optimizer.summary(st), C.green) end
         end)
     end
 end
@@ -2847,7 +2858,7 @@ end
 setTab("Model")
 
 -- =========================================================
--- TAB TOOLS: SCRIPT LIBRARY + SCANNER SCRIPT BERBAHAYA
+-- TAB TOOLS: SCRIPT LIBRARY + OPTIMIZER
 -- =========================================================
 local SCRIPT_LIB = {
     {name = "Pintu Otomatis", class = "Script", target = "part", partSize = Vector3.new(8, 10, 1),
@@ -3088,7 +3099,7 @@ end)
 
 local function buildTools(host, ctx)
     local C = ctx.colors
-    local Scanner = ctx.scanner
+    local Optimizer = ctx.optimizer
     local Selection = game:GetService("Selection")
     local TOP = 106
 
@@ -3113,21 +3124,21 @@ local function buildTools(host, ctx)
     end
 
     local libPane = new("Frame", {Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, ZIndex = 3}, pane)
-    local scanPane = new("Frame", {Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, ZIndex = 3, Visible = false}, pane)
+    local optPane = new("Frame", {Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, ZIndex = 3, Visible = false}, pane)
 
     local subButtons = {}
     local function showSub(name)
         libPane.Visible = (name == "Scripts")
-        scanPane.Visible = (name == "Scanner")
+        optPane.Visible = (name == "Optimizer")
         for n, b in pairs(subButtons) do
             b.BackgroundColor3 = (n == name) and C.accent or C.input
             b.TextColor3 = (n == name) and C.ink or C.sub
         end
     end
-    for i, name in ipairs({"Scripts", "Scanner"}) do
+    for i, name in ipairs({"Scripts", "Optimizer"}) do
         local b = new("TextButton", {
             LayoutOrder = i, Size = UDim2.new(0.5, -2, 1, 0), BackgroundColor3 = C.input,
-            Text = (name == "Scripts") and "SCRIPT LIBRARY" or "SCANNER", TextColor3 = C.sub, TextSize = 9,
+            Text = (name == "Scripts") and "SCRIPT LIBRARY" or "OPTIMIZER", TextColor3 = C.sub, TextSize = 9,
             Font = Enum.Font.GothamBold, BorderSizePixel = 0, ZIndex = 5,
         }, subBar)
         round(b, 6)
@@ -3277,214 +3288,162 @@ local function buildTools(host, ctx)
     end
     filterBox:GetPropertyChangedSignal("Text"):Connect(applyFilter)
 
-    -- ===================== SCANNER =====================
-    local LEVEL = {
-        HIGH = {text = "BAHAYA", color = C.red},
-        MED = {text = "CURIGA", color = C.cyan},
-        LOW = {text = "CEK", color = C.yellow},
-        UNKNOWN = {text = "?", color = C.dim},
+    -- ===================== OPTIMIZER =====================
+    local optMode = "SELECTED"
+    local running = false
+    local OPT_DEFS = {
+        {"anchor", "ANCHOR PART STATIS", "Part tidak ikut dihitung fisika. Part bergerak (kendaraan, karakter, tool, constraint) otomatis dilewati.", false},
+        {"fluid", "MATIKAN FLUID FORCES", "Hilangkan hitungan gaya air/udara pada part. Tidak mengubah tampilan.", false},
+        {"render", "LOD MESH OTOMATIS", "MeshPart memakai detail otomatis: tampak sama dari dekat, lebih ringan dari jauh.", false},
+        {"lod", "LOD MODEL OTOMATIS", "Model jauh dirender lebih ringan. Tampilan dekat tetap sama.", false},
+        {"shadowSmall", "SHADOW PART KECIL OFF", "Part kecil tidak membuat bayangan. Beda bayangan sangat tipis.", false},
+        {"shadowLights", "SHADOW LAMPU OFF", "Lampu tetap menyala, tapi tanpa bayangan dinamis.", false},
+        {"hull", "COLLISION SIMPEL (HULL)", "Collision mesh lebih ringan. Bangunan berongga bisa jadi tidak bisa dimasuki.", true},
+        {"touch", "TOUCH DEKORASI OFF", "Part tidak memicu event Touched. Bisa merusak kill brick / teleport pad.", true},
+        {"fx", "MATIKAN EFEK BERAT", "Partikel, trail, beam, api, asap dimatikan (tampilan efek hilang).", true},
     }
-    local scanMode = "WORKSPACE"
-    local scanning = false
 
-    local row1 = new("Frame", {Size = UDim2.new(1, 0, 0, 26), BackgroundTransparency = 1, ZIndex = 4}, scanPane)
+    local row1 = new("Frame", {Size = UDim2.new(1, 0, 0, 26), BackgroundTransparency = 1, ZIndex = 4}, optPane)
     new("UIListLayout", {FillDirection = Enum.FillDirection.Horizontal, Padding = UDim.new(0, 4), SortOrder = Enum.SortOrder.LayoutOrder}, row1)
     local modeBtns = {}
-    local function setScanMode(m)
-        scanMode = m
+    local function setOptMode(m)
+        optMode = m
         for n, b in pairs(modeBtns) do
             b.BackgroundColor3 = (n == m) and C.stroke or C.input
             b.TextColor3 = (n == m) and C.text or C.sub
         end
     end
-    local modeDefs = {{"WORKSPACE", "WORKSPACE", 0.28}, {"SELECTED", "TERPILIH", 0.24}, {"ALL", "SEMUA", 0.2}}
-    for i, d in ipairs(modeDefs) do
+    for i, d in ipairs({{"SELECTED", "TERPILIH", 0.3}, {"WORKSPACE", "WORKSPACE", 0.3}}) do
         local b = new("TextButton", {
             LayoutOrder = i, Size = UDim2.new(d[3], -3, 1, 0), BackgroundColor3 = C.input, Text = d[2], TextColor3 = C.sub,
             TextSize = 8.5, Font = Enum.Font.GothamBold, BorderSizePixel = 0, ZIndex = 5,
         }, row1)
         round(b, 6)
         modeBtns[d[1]] = b
-        b.MouseButton1Click:Connect(function() setScanMode(d[1]) end)
+        b.MouseButton1Click:Connect(function() setOptMode(d[1]) end)
     end
-    local scanBtn = new("TextButton", {
-        LayoutOrder = 4, Size = UDim2.new(0.28, -3, 1, 0), BackgroundColor3 = C.accent, Text = "SCAN", TextColor3 = C.ink,
+    local runBtn = new("TextButton", {
+        LayoutOrder = 3, Size = UDim2.new(0.4, -3, 1, 0), BackgroundColor3 = C.accent, Text = "OPTIMIZE", TextColor3 = C.ink,
         TextSize = 10, Font = Enum.Font.GothamBold, BorderSizePixel = 0, ZIndex = 5,
     }, row1)
-    round(scanBtn, 6)
+    round(runBtn, 6)
 
-    local row2 = new("Frame", {Size = UDim2.new(1, 0, 0, 24), Position = UDim2.fromOffset(0, 30), BackgroundTransparency = 1, ZIndex = 4}, scanPane)
+    local nameBar = new("Frame", {Size = UDim2.new(1, 0, 0, 26), Position = UDim2.fromOffset(0, 30), BackgroundColor3 = C.input, BorderSizePixel = 0, ZIndex = 4}, optPane)
+    round(nameBar, 6)
+    local nStroke = stroke(nameBar, C.stroke, 1.2, 0.5)
+    local nameBox = new("TextBox", {
+        Size = UDim2.new(1, -16, 1, 0), Position = UDim2.fromOffset(8, 0), BackgroundTransparency = 1, Text = "",
+        PlaceholderText = "Nama folder/model (kosong = yang dipilih)", TextColor3 = C.text, PlaceholderColor3 = C.dim,
+        TextSize = 10, Font = Enum.Font.Code, ClearTextOnFocus = false, TextXAlignment = Enum.TextXAlignment.Left, ZIndex = 5,
+    }, nameBar)
+    nameBox.Focused:Connect(function() nStroke.Color = C.accent; nStroke.Transparency = 0 end)
+    nameBox.FocusLost:Connect(function() nStroke.Color = C.stroke; nStroke.Transparency = 0.5 end)
+
+    local row2 = new("Frame", {Size = UDim2.new(1, 0, 0, 24), Position = UDim2.fromOffset(0, 60), BackgroundTransparency = 1, ZIndex = 4}, optPane)
     new("UIListLayout", {FillDirection = Enum.FillDirection.Horizontal, Padding = UDim.new(0, 4), SortOrder = Enum.SortOrder.LayoutOrder}, row2)
+    local undoBtn = new("TextButton", {
+        LayoutOrder = 1, Size = UDim2.new(0.5, -2, 1, 0), BackgroundColor3 = C.input, Text = "UNDO SEMUA", TextColor3 = C.red,
+        TextSize = 8.5, Font = Enum.Font.GothamBold, BorderSizePixel = 0, ZIndex = 5,
+    }, row2)
+    round(undoBtn, 6)
     local autoBtn = new("TextButton", {
-        LayoutOrder = 1, Size = UDim2.new(0.5, -2, 1, 0), BackgroundColor3 = C.input, Text = "", TextSize = 8.5,
+        LayoutOrder = 2, Size = UDim2.new(0.5, -2, 1, 0), BackgroundColor3 = C.input, Text = "", TextSize = 8.5,
         Font = Enum.Font.GothamBold, BorderSizePixel = 0, ZIndex = 5,
     }, row2)
     round(autoBtn, 6)
     local function paintAuto()
-        autoBtn.Text = Scanner.autoScan and "AUTO-SCAN INSERT: ON" or "AUTO-SCAN INSERT: OFF"
-        autoBtn.TextColor3 = Scanner.autoScan and C.green or C.dim
+        autoBtn.Text = Optimizer.auto and "AUTO SAAT INSERT: ON" or "AUTO SAAT INSERT: OFF"
+        autoBtn.TextColor3 = Optimizer.auto and C.green or C.dim
     end
     paintAuto()
-    autoBtn.MouseButton1Click:Connect(function() Scanner.autoScan = not Scanner.autoScan; paintAuto() end)
-    local delBtn = new("TextButton", {
-        LayoutOrder = 2, Size = UDim2.new(0.5, -2, 1, 0), BackgroundColor3 = C.input, Text = "HAPUS SEMUA BAHAYA", TextColor3 = C.red,
-        TextSize = 8.5, Font = Enum.Font.GothamBold, BorderSizePixel = 0, ZIndex = 5,
-    }, row2)
-    round(delBtn, 6)
+    autoBtn.MouseButton1Click:Connect(function() Optimizer.auto = not Optimizer.auto; paintAuto() end)
 
     local summary = new("TextLabel", {
-        Size = UDim2.new(1, 0, 0, 16), Position = UDim2.fromOffset(0, 58), BackgroundTransparency = 1,
-        Text = "Belum ada hasil. Tekan SCAN.", TextColor3 = C.sub, Font = Enum.Font.GothamBold, TextSize = 9,
+        Size = UDim2.new(1, 0, 0, 16), Position = UDim2.fromOffset(0, 88), BackgroundTransparency = 1,
+        Text = "Pilih opsi lalu tekan OPTIMIZE.", TextColor3 = C.sub, Font = Enum.Font.GothamBold, TextSize = 9,
         TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 4,
-    }, scanPane)
-    local scanList = new("ScrollingFrame", {
-        Size = UDim2.new(1, 0, 1, -78), Position = UDim2.fromOffset(0, 78), BackgroundTransparency = 1, BorderSizePixel = 0,
+    }, optPane)
+    local optList = new("ScrollingFrame", {
+        Size = UDim2.new(1, 0, 1, -108), Position = UDim2.fromOffset(0, 108), BackgroundTransparency = 1, BorderSizePixel = 0,
         ScrollBarThickness = 3, ScrollBarImageColor3 = C.accent, CanvasSize = UDim2.new(), AutomaticCanvasSize = Enum.AutomaticSize.Y, ZIndex = 4,
-    }, scanPane)
-    new("UIListLayout", {Padding = UDim.new(0, 5), SortOrder = Enum.SortOrder.LayoutOrder}, scanList)
-    new("UIPadding", {PaddingRight = UDim.new(0, 4), PaddingBottom = UDim.new(0, 6)}, scanList)
+    }, optPane)
+    new("UIListLayout", {Padding = UDim.new(0, 5), SortOrder = Enum.SortOrder.LayoutOrder}, optList)
+    new("UIPadding", {PaddingRight = UDim.new(0, 4), PaddingBottom = UDim.new(0, 6)}, optList)
 
-    local currentRes
-    local function clearList()
-        for _, c in ipairs(scanList:GetChildren()) do
-            if c:IsA("GuiObject") then c:Destroy() end
+    for i, d in ipairs(OPT_DEFS) do
+        local key, title, desc, risky = d[1], d[2], d[3], d[4]
+        local card = new("Frame", {Size = UDim2.new(1, 0, 0, 54), BackgroundColor3 = C.panel, BorderSizePixel = 0, LayoutOrder = i, ZIndex = 5}, optList)
+        round(card, 8)
+        stroke(card, risky and C.yellow or C.stroke, 1, 0.55)
+        new("TextLabel", {Size = UDim2.new(1, -72, 0, 14), Position = UDim2.fromOffset(8, 5), BackgroundTransparency = 1, Text = title, TextColor3 = C.text, Font = Enum.Font.GothamBold, TextSize = 10, TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 6}, card)
+        new("TextLabel", {Size = UDim2.new(1, -72, 0, 30), Position = UDim2.fromOffset(8, 20), BackgroundTransparency = 1, Text = desc, TextColor3 = risky and C.yellow or C.sub, Font = Enum.Font.Gotham, TextSize = 8.5, TextWrapped = true, TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top, ZIndex = 6}, card)
+        local tg = new("TextButton", {Size = UDim2.fromOffset(52, 24), Position = UDim2.new(1, -60, 0.5, -12), BackgroundColor3 = C.input, Text = "", TextSize = 10, Font = Enum.Font.GothamBold, BorderSizePixel = 0, ZIndex = 7}, card)
+        round(tg, 6)
+        local function paint()
+            local on = Optimizer.opts[key]
+            tg.Text = on and "ON" or "OFF"
+            tg.BackgroundColor3 = on and C.accent or C.input
+            tg.TextColor3 = on and C.ink or C.dim
         end
-    end
-    local function paintSummary(res)
-        if not res then return end
-        local alive = {high = 0, med = 0}
-        for _, it in ipairs(res.items) do
-            if it.obj and it.obj.Parent then
-                if it.level == "HIGH" then alive.high += 1 elseif it.level == "MED" then alive.med += 1 end
-            end
-        end
-        summary.Text = ("%d script dipindai | %d bahaya | %d curiga | %d tak terbaca"):format(res.total, alive.high, alive.med, res.unknown)
-        summary.TextColor3 = (alive.high > 0 and C.red) or (alive.med > 0 and C.cyan) or C.green
-    end
-
-    local function render(res)
-        currentRes = res
-        clearList()
-        paintSummary(res)
-        if #res.items == 0 then
-            new("TextLabel", {Size = UDim2.new(1, 0, 0, 40), BackgroundTransparency = 1, Text = "Bersih: tidak ada pola berbahaya ditemukan.", TextColor3 = C.green, Font = Enum.Font.Gotham, TextSize = 10, TextWrapped = true, ZIndex = 5}, scanList)
-            return
-        end
-        for i, it in ipairs(res.items) do
-            if i > 120 then
-                new("TextLabel", {Size = UDim2.new(1, 0, 0, 24), BackgroundTransparency = 1, LayoutOrder = i, Text = "... dan " .. (#res.items - 120) .. " temuan lain (tidak ditampilkan)", TextColor3 = C.sub, Font = Enum.Font.Gotham, TextSize = 9, ZIndex = 5}, scanList)
-                break
-            end
-            local lv = LEVEL[it.level]
-            local obj = it.obj
-            local card = new("Frame", {Size = UDim2.new(1, 0, 0, 70), BackgroundColor3 = C.panel, BorderSizePixel = 0, LayoutOrder = i, ZIndex = 5}, scanList)
-            round(card, 8)
-            stroke(card, lv.color, 1, 0.45)
-            local badge = new("TextLabel", {Size = UDim2.fromOffset(50, 16), Position = UDim2.fromOffset(6, 6), BackgroundColor3 = lv.color, Text = lv.text, TextColor3 = C.ink, Font = Enum.Font.GothamBold, TextSize = 8.5, BorderSizePixel = 0, ZIndex = 6}, card)
-            round(badge, 4)
-            local pname = obj.Parent and obj.Parent.Name or "?"
-            new("TextLabel", {Size = UDim2.new(1, -68, 0, 16), Position = UDim2.fromOffset(62, 6), BackgroundTransparency = 1, Text = ("%s (%s) < %s"):format(obj.Name, obj.ClassName, pname), TextColor3 = C.text, Font = Enum.Font.GothamBold, TextSize = 10, TextXAlignment = Enum.TextXAlignment.Left, TextTruncate = Enum.TextTruncate.AtEnd, ZIndex = 6}, card)
-            new("TextLabel", {Size = UDim2.new(1, -12, 0, 24), Position = UDim2.fromOffset(6, 24), BackgroundTransparency = 1, Text = table.concat(it.reasons, "; "), TextColor3 = C.sub, Font = Enum.Font.Gotham, TextSize = 9, TextWrapped = true, TextXAlignment = Enum.TextXAlignment.Left, TextYAlignment = Enum.TextYAlignment.Top, ZIndex = 6}, card)
-            local brow = new("Frame", {Size = UDim2.new(1, -12, 0, 18), Position = UDim2.fromOffset(6, 49), BackgroundTransparency = 1, ZIndex = 6}, card)
-            new("UIListLayout", {FillDirection = Enum.FillDirection.Horizontal, Padding = UDim.new(0, 4), SortOrder = Enum.SortOrder.LayoutOrder}, brow)
-            local sel = new("TextButton", {LayoutOrder = 1, Size = UDim2.new(0.5, -2, 1, 0), BackgroundColor3 = C.input, Text = "PILIH", TextColor3 = C.accent2, TextSize = 9, Font = Enum.Font.GothamBold, BorderSizePixel = 0, ZIndex = 7}, brow)
-            round(sel, 5)
-            local del = new("TextButton", {LayoutOrder = 2, Size = UDim2.new(0.5, -2, 1, 0), BackgroundColor3 = C.input, Text = "HAPUS", TextColor3 = C.red, TextSize = 9, Font = Enum.Font.GothamBold, BorderSizePixel = 0, ZIndex = 7}, brow)
-            round(del, 5)
-            sel.MouseButton1Click:Connect(function()
-                if obj.Parent then
-                    ctx.selectObj(obj)
-                    setStatus(obj:GetFullName(), C.sub)
-                else
-                    setStatus("Script sudah tidak ada", C.dim)
-                end
-            end)
-            del.MouseButton1Click:Connect(function()
-                if pcall(function() obj:Destroy() end) then
-                    card:Destroy()
-                    paintSummary(currentRes)
-                    setStatus("Script dihapus: " .. obj.Name, C.green)
-                else
-                    setStatus("Gagal menghapus script", C.red)
-                end
-            end)
-        end
-    end
-
-    local function getRoots(m)
-        if m == "WORKSPACE" then return {workspace} end
-        if m == "SELECTED" then
-            local ok, sel = pcall(function() return Selection:Get() end)
-            return (ok and sel) or {}
-        end
-        local roots = {}
-        for _, name in ipairs({"Workspace", "Lighting", "ReplicatedFirst", "ReplicatedStorage", "StarterGui", "StarterPack", "StarterPlayer", "ServerScriptService", "ServerStorage"}) do
-            local ok, svc = pcall(function() return game:GetService(name) end)
-            if ok and svc then roots[#roots + 1] = svc end
-        end
-        return roots
-    end
-
-    local function runScan()
-        if scanning then return end
-        local roots = getRoots(scanMode)
-        if #roots == 0 then
-            setStatus("Tidak ada objek terpilih. Pilih model dulu.", C.yellow)
-            return
-        end
-        scanning = true
-        scanBtn.Text = "..."
-        setStatus("Memindai script...", C.text)
-        local ok, res = pcall(Scanner.scan, roots, ctx.gui, function(i, n)
-            setStatus(("Memindai %d / %d script..."):format(i, n), C.text)
+        paint()
+        tg.MouseButton1Click:Connect(function()
+            Optimizer.opts[key] = not Optimizer.opts[key]
+            paint()
         end)
-        scanning = false
-        scanBtn.Text = "SCAN"
-        if not ok then
-            setStatus("Scan gagal: " .. tostring(res):sub(1, 60), C.red)
-            return
-        end
-        render(res)
-        setStatus(res.high > 0 and "Ditemukan script berbahaya!" or "Scan selesai", res.high > 0 and C.red or C.green)
     end
-    scanBtn.MouseButton1Click:Connect(function() task.spawn(runScan) end)
+
+    local function getRoots()
+        local name = nameBox.Text:match("^%s*(.-)%s*$")
+        if name ~= "" then
+            local found = workspace:FindFirstChild(name, true) or game:FindFirstChild(name, true)
+            return found and {found} or {}, "Tidak ditemukan: " .. name
+        end
+        if optMode == "WORKSPACE" then return {workspace} end
+        local ok, sel = pcall(function() return Selection:Get() end)
+        return (ok and sel) or {}, "Belum ada yang dipilih. Pilih folder/model atau ketik namanya."
+    end
 
     local armed = false
-    delBtn.MouseButton1Click:Connect(function()
-        if not currentRes then return setStatus("Belum ada hasil scan", C.yellow) end
-        if not armed then
+    local function runOpt()
+        if running then return end
+        local roots, err = getRoots()
+        if #roots == 0 then return setStatus(err, C.yellow) end
+        if roots[1] == workspace and not armed then
             armed = true
-            delBtn.Text = "YAKIN? TAP LAGI"
-            task.delay(3, function()
-                armed = false
-                delBtn.Text = "HAPUS SEMUA BAHAYA"
-            end)
+            runBtn.Text = "YAKIN? TAP"
+            task.delay(3, function() armed = false; runBtn.Text = "OPTIMIZE" end)
             return
         end
         armed = false
-        delBtn.Text = "HAPUS SEMUA BAHAYA"
-        local n = 0
-        for _, it in ipairs(currentRes.items) do
-            if it.level == "HIGH" and it.obj and it.obj.Parent then
-                if pcall(function() it.obj:Destroy() end) then n += 1 end
-            end
-        end
-        render(currentRes)
-        setStatus(n .. " script berbahaya dihapus", C.green)
+        running = true
+        runBtn.Text = "..."
+        setStatus("Mengoptimalkan...", C.text)
+        local ok, st = pcall(Optimizer.run, roots, ctx.gui, function(i, n)
+            setStatus(("Memproses %d / %d objek..."):format(i, n), C.text)
+        end)
+        running = false
+        runBtn.Text = "OPTIMIZE"
+        if not ok then return setStatus("Gagal: " .. tostring(st):sub(1, 60), C.red) end
+        summary.Text = Optimizer.summary(st)
+        summary.TextColor3 = C.green
+        setStatus("Selesai. Tekan UNDO SEMUA untuk membatalkan.", C.green)
+        ctx.log("Optimizer: " .. Optimizer.summary(st), C.green)
+    end
+    runBtn.MouseButton1Click:Connect(function() task.spawn(runOpt) end)
+    undoBtn.MouseButton1Click:Connect(function()
+        task.spawn(function()
+            local n = Optimizer.undoAll()
+            summary.Text = n .. " perubahan dikembalikan"
+            summary.TextColor3 = C.yellow
+            setStatus("Undo selesai", C.green)
+        end)
     end)
 
-    setScanMode("WORKSPACE")
+    setOptMode("SELECTED")
     showSub("Scripts")
     applyFilter()
 
-    return {
-        -- dipanggil otomatis setelah insert model (hasil auto-scan)
-        render = function(res)
-            render(res)
-            showSub("Scanner")
-        end,
-        setStatus = setStatus,
-    }
+    return {setStatus = setStatus}
 end
 
 -- =========================================================
@@ -3504,19 +3463,12 @@ else
     }, impView)
 end
 
--- TAB TOOLS (Script Library + Scanner)
+-- TAB TOOLS (Script Library + Optimizer)
 local okTools, toolsApi = pcall(buildTools, toolsView, {
-    colors = C, scanner = Scanner, gui = gui, top = 50 + TB_OFF,
+    colors = C, optimizer = Optimizer, gui = gui, top = 50 + TB_OFF,
     log = log, selectObj = selectObj, spawnCFrame = spawnCFrame,
 })
-if okTools and type(toolsApi) == "table" then
-    Scanner.onResult = function(res)
-        toolsApi.render(res)
-        if res.high > 0 and not toolsView.Visible and modeButtons.Tools then
-            modeButtons.Tools.Text = "TOOLS !"
-        end
-    end
-else
+if not (okTools and type(toolsApi) == "table") then
     log("X Panel tools gagal dimuat: " .. tostring(toolsApi):sub(1, 60), C.red)
     new("TextLabel", {
         Size = UDim2.new(1, -24, 0, 70), Position = UDim2.fromOffset(12, 50 + TB_OFF), BackgroundTransparency = 1,
