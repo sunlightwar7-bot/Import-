@@ -1,7 +1,7 @@
--- BALEREOT COMMUNITY | PLAY MODE
--- Fitur: God Mode (anti damage) | Fly | Infinite Jump | Noclip | Lari Cepat (speed bisa diatur)
--- Toggle panel: tombol "BC" atau RightShift
--- Kontrol Fly: gerak = joystick / WASD (arah ikut kamera), naik = Space / E / tombol NAIK, turun = Q / tombol TURUN
+-- BALEREOT COMMUNITY | PLAY MODE v2
+-- God Mode | Fly | Infinite Jump | Noclip | Lari Cepat | Damage Boost (lipat damage ke musuh/NPC)
+-- Buka/tutup panel: tombol "BC" di tepi kiri atau RightShift
+-- Fly: gerak = joystick / WASD (ikut arah kamera), naik = Space / E / tombol NAIK, turun = Q / tombol TURUN
 
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
@@ -11,12 +11,14 @@ local TweenService = game:GetService("TweenService")
 local lp = Players.LocalPlayer
 local cam = workspace.CurrentCamera
 
--- Bersihkan instance lama kalau script dijalankan ulang
 pcall(function()
     if getgenv and getgenv().BC_PLAYMODE_CLEANUP then getgenv().BC_PLAYMODE_CLEANUP() end
 end)
 
-local S = {god = false, fly = false, inf = false, noclip = false, sprint = false, flySpeed = 60, runSpeed = 50}
+local S = {
+    god = false, fly = false, inf = false, noclip = false, sprint = false, dmg = false,
+    flySpeed = 60, runSpeed = 50, dmgMult = 5, reach = 15,
+}
 local char, hum, root
 local DEFAULT_WALK = 16
 local conns = {}
@@ -24,11 +26,6 @@ local function connect(sig, fn) local c = sig:Connect(fn); conns[#conns + 1] = c
 
 -- =====================================================================
 -- GOD MODE (kebal beneran)
---   1. MaxHealth & Health = tak terhingga
---   2. ForceField tak terlihat (blok damage standar)
---   3. State Dead dimatikan, leher tidak bisa putus
---   4. Health dikunci tiap frame + tiap HealthChanged
---   5. Anti jatuh ke void: otomatis balik ke posisi aman terakhir
 -- =====================================================================
 local healthConn, lastSafe
 local function godOn()
@@ -97,11 +94,55 @@ local function noclipOff()
         if part and part.Parent then pcall(function() part.CanCollide = true end) end
     end
     noclipTouched = {}
-    -- HumanoidRootPart memang aslinya CanCollide = true, kepala/badan dikembalikan juga
 end
 
 -- =====================================================================
--- Terapkan ulang semua fitur setelah respawn / ganti karakter
+-- DAMAGE BOOST
+--   Tiap kali Tool yang kamu pegang dipakai (Activated), musuh/NPC dalam
+--   jangkauan disentuh ulang (dmgMult - 1) kali lewat firetouchinterest,
+--   jadi senjata berbasis Touched memberi damage berlipat.
+--   Butuh executor dengan firetouchinterest. Tidak berefek kalau damage
+--   dihitung server lewat RemoteEvent atau senjata punya debounce.
+-- =====================================================================
+local hasTouch = typeof(firetouchinterest) == "function"
+
+local function getEnemies()
+    local list = {}
+    for _, h in ipairs(workspace:GetDescendants()) do
+        if h:IsA("Humanoid") and h.Health > 0 and h.Parent and h.Parent ~= char
+            and not Players:GetPlayerFromCharacter(h.Parent) then
+            local part = h.Parent:FindFirstChild("HumanoidRootPart") or h.Parent:FindFirstChildWhichIsA("BasePart")
+            if part then list[#list + 1] = part end
+        end
+    end
+    return list
+end
+
+local function boost(tool)
+    if not (S.dmg and hasTouch and root) then return end
+    local handle = tool:FindFirstChild("Handle") or tool:FindFirstChildWhichIsA("BasePart")
+    if not handle then return end
+    local extra = math.max(0, S.dmgMult - 1)
+    for _, part in ipairs(getEnemies()) do
+        if root and (part.Position - root.Position).Magnitude <= S.reach then
+            for i = 1, extra do
+                pcall(firetouchinterest, handle, part, 0)
+                pcall(firetouchinterest, handle, part, 1)
+                if i % 20 == 0 then task.wait() end
+            end
+        end
+    end
+end
+
+local hooked = setmetatable({}, {__mode = "k"})
+local function hookTool(t)
+    if not t:IsA("Tool") or hooked[t] then return end
+    hooked[t] = true
+    connect(t.Activated, function() task.spawn(boost, t) end)
+end
+
+-- =====================================================================
+-- Terapkan ulang fitur setelah respawn
 -- =====================================================================
 local function bindChar(c)
     char = c
@@ -111,6 +152,13 @@ local function bindChar(c)
     DEFAULT_WALK = 16
     lastSafe = root.CFrame
     noclipTouched = {}
+    for _, o in ipairs(c:GetChildren()) do hookTool(o) end
+    connect(c.ChildAdded, hookTool)
+    local bp = lp:FindFirstChildOfClass("Backpack")
+    if bp then
+        for _, o in ipairs(bp:GetChildren()) do hookTool(o) end
+        connect(bp.ChildAdded, hookTool)
+    end
     if S.god then godOn() end
     if S.fly then flyOn() end
 end
@@ -124,7 +172,6 @@ connect(RunService.Heartbeat, function()
     if not (char and hum and root and root.Parent) then return end
     cam = workspace.CurrentCamera
 
-    -- God: kunci health + cegah state mati + anti void
     if S.god then
         if hum.MaxHealth ~= math.huge then pcall(function() hum.MaxHealth = math.huge end) end
         if hum.Health < hum.MaxHealth then hum.Health = hum.MaxHealth end
@@ -144,7 +191,6 @@ connect(RunService.Heartbeat, function()
         end
     end
 
-    -- Fly
     if S.fly then
         if not (flyBV and flyBV.Parent) then flyOn() end
         if flyBV then
@@ -164,13 +210,9 @@ connect(RunService.Heartbeat, function()
         end
     end
 
-    -- Lari cepat
-    if S.sprint and not S.fly then
-        hum.WalkSpeed = S.runSpeed
-    end
+    if S.sprint and not S.fly then hum.WalkSpeed = S.runSpeed end
 end)
 
--- Noclip (di Stepped supaya jalan sebelum fisika)
 connect(RunService.Stepped, function()
     if S.noclip and char then
         for _, p in ipairs(char:GetDescendants()) do
@@ -182,7 +224,6 @@ connect(RunService.Stepped, function()
     end
 end)
 
--- Infinite jump
 connect(UIS.JumpRequest, function()
     if S.inf and hum and hum.Parent and not S.fly then
         hum:ChangeState(Enum.HumanoidStateType.Jumping)
@@ -190,14 +231,18 @@ connect(UIS.JumpRequest, function()
 end)
 
 -- =====================================================================
--- GUI (tema Royal Gold)
+-- GUI: Royal Gold 3D
 -- =====================================================================
 local C = {
     bg = Color3.fromRGB(14, 12, 17), panel = Color3.fromRGB(22, 19, 26), input = Color3.fromRGB(34, 29, 38),
     stroke = Color3.fromRGB(110, 86, 40), accent = Color3.fromRGB(236, 186, 74),
-    text = Color3.fromRGB(248, 242, 230), sub = Color3.fromRGB(176, 164, 142),
-    green = Color3.fromRGB(90, 228, 150), ink = Color3.fromRGB(28, 18, 4),
+    accent2 = Color3.fromRGB(255, 232, 170), text = Color3.fromRGB(248, 242, 230),
+    sub = Color3.fromRGB(176, 164, 142), ink = Color3.fromRGB(28, 18, 4), off = Color3.fromRGB(64, 55, 70),
+    red = Color3.fromRGB(238, 82, 92),
 }
+local FONT = Enum.Font.GothamBold
+local DEPTH = 4
+
 local function new(class, props, parent)
     local o = Instance.new(class)
     for k, v in pairs(props) do o[k] = v end
@@ -205,39 +250,121 @@ local function new(class, props, parent)
     return o
 end
 local function round(o, r) new("UICorner", {CornerRadius = UDim.new(0, r or 8)}, o) end
+local function shade(c, f) return Color3.new(math.min(1, c.R * f), math.min(1, c.G * f), math.min(1, c.B * f)) end
+
+-- teks 3D: 2 lapis bayangan di belakang teks utama (efek timbul)
+local function text3d(parent, p)
+    local holder = new("Frame", {
+        Size = p.Size or UDim2.fromScale(1, 1), Position = p.Position or UDim2.new(),
+        BackgroundTransparency = 1, ZIndex = p.Z or 3,
+    }, parent)
+    local function lbl(off, col, z)
+        return new("TextLabel", {
+            Size = UDim2.fromScale(1, 1), Position = UDim2.fromOffset(off, off), BackgroundTransparency = 1,
+            Text = p.Text or "", TextColor3 = col, Font = FONT, TextSize = p.TextSize or 11,
+            TextXAlignment = p.XAlign or Enum.TextXAlignment.Left, ZIndex = z,
+        }, holder)
+    end
+    local s2 = lbl(2, Color3.fromRGB(8, 5, 0), (p.Z or 3))
+    local s1 = lbl(1, p.Shadow or shade(p.Color or C.text, 0.4), (p.Z or 3) + 1)
+    local top = lbl(0, p.Color or C.text, (p.Z or 3) + 2)
+    return {
+        set = function(text, color, shadow)
+            for _, l in ipairs({s2, s1, top}) do l.Text = text end
+            top.TextColor3 = color
+            s1.TextColor3 = shadow or shade(color, 0.4)
+        end,
+    }
+end
+
+-- tombol 3D: sisi bawah tebal + permukaan yang turun saat ditekan
+local function btn3d(parent, p)
+    local holder = new("Frame", {Size = p.Size, Position = p.Position, BackgroundTransparency = 1, ZIndex = 3}, parent)
+    local depth = new("Frame", {
+        Size = UDim2.new(1, 0, 1, -DEPTH), Position = UDim2.fromOffset(0, DEPTH),
+        BackgroundColor3 = shade(p.Color, 0.5), BorderSizePixel = 0, ZIndex = 3,
+    }, holder)
+    round(depth, p.Radius or 8)
+    local face = new("TextButton", {
+        Size = UDim2.new(1, 0, 1, -DEPTH), BackgroundColor3 = p.Color, Text = "", AutoButtonColor = false,
+        BorderSizePixel = 0, ZIndex = 4,
+    }, holder)
+    round(face, p.Radius or 8)
+    local grad = new("UIGradient", {Rotation = 90}, face)
+    local function setGrad(c)
+        grad.Color = ColorSequence.new({
+            ColorSequenceKeypoint.new(0, shade(c, 1.3)),
+            ColorSequenceKeypoint.new(0.5, c),
+            ColorSequenceKeypoint.new(1, shade(c, 0.82)),
+        })
+    end
+    setGrad(p.Color)
+    new("UIStroke", {Color = shade(p.Color, 0.55), Thickness = 1, Transparency = 0.2}, face)
+    local label = text3d(face, {
+        Text = p.Text, TextSize = p.TextSize or 11, Color = p.TextColor or C.ink,
+        Shadow = p.Shadow, XAlign = Enum.TextXAlignment.Center, Z = 5,
+    })
+    local api = {face = face, label = label}
+    function api.setColor(c)
+        face.BackgroundColor3 = c
+        depth.BackgroundColor3 = shade(c, 0.5)
+        setGrad(c)
+    end
+    local function press(down)
+        TweenService:Create(face, TweenInfo.new(0.06), {Position = UDim2.fromOffset(0, down and (DEPTH - 1) or 0)}):Play()
+    end
+    face.MouseButton1Down:Connect(function() press(true); if p.onDown then p.onDown() end end)
+    face.MouseButton1Up:Connect(function() press(false); if p.onUp then p.onUp() end end)
+    face.MouseLeave:Connect(function() press(false); if p.onUp then p.onUp() end end)
+    face.MouseButton1Click:Connect(function() if p.onClick then p.onClick() end end)
+    return api
+end
 
 local gui = new("ScreenGui", {Name = "BC_PlayMode", ResetOnSpawn = false, ZIndexBehavior = Enum.ZIndexBehavior.Sibling, DisplayOrder = 999}, nil)
 local okHui, hui = pcall(function() return gethui and gethui() end)
 gui.Parent = (okHui and hui) or lp:WaitForChild("PlayerGui")
 
-local main = new("Frame", {
-    Size = UDim2.fromOffset(236, 360), Position = UDim2.new(0, 14, 0.5, -180),
-    BackgroundColor3 = C.panel, BorderSizePixel = 0, Active = true,
+-- ukuran panel menyesuaikan tinggi layar, posisi kiri-tengah
+local W = 244
+local H = math.clamp(math.floor(cam.ViewportSize.Y * 0.78), 240, 430)
+local OPEN_X, CLOSED_X = 8, -(W + 24)
+
+local rootF = new("Frame", {
+    Size = UDim2.fromOffset(W, H), Position = UDim2.new(0, OPEN_X, 0.5, -H / 2),
+    BackgroundTransparency = 1, ZIndex = 2,
 }, gui)
-round(main, 12)
-new("UIStroke", {Color = C.stroke, Thickness = 1.4}, main)
 
-local title = new("Frame", {Size = UDim2.new(1, 0, 0, 34), BackgroundColor3 = C.bg, BorderSizePixel = 0}, main)
-round(title, 12)
-new("Frame", {Size = UDim2.new(1, 0, 0, 10), Position = UDim2.new(0, 0, 1, -10), BackgroundColor3 = C.bg, BorderSizePixel = 0}, title)
-new("TextLabel", {
-    Size = UDim2.new(1, -16, 1, 0), Position = UDim2.fromOffset(12, 0), BackgroundTransparency = 1,
-    Text = "BALEREOT  •  PLAY MODE", TextColor3 = C.accent, Font = Enum.Font.GothamBold, TextSize = 12,
-    TextXAlignment = Enum.TextXAlignment.Left,
-}, title)
+local slab = new("Frame", {
+    Size = UDim2.new(1, 0, 1, -5), Position = UDim2.fromOffset(0, 5), BackgroundColor3 = C.stroke,
+    BorderSizePixel = 0, ZIndex = 2,
+}, rootF)
+round(slab, 14)
+local main = new("Frame", {
+    Size = UDim2.new(1, 0, 1, -5), BackgroundColor3 = C.panel, BorderSizePixel = 0, Active = true, ZIndex = 2,
+}, rootF)
+round(main, 14)
+new("UIStroke", {Color = C.accent, Thickness = 1.4, Transparency = 0.35}, main)
 
--- drag panel lewat title
+local title = new("Frame", {Size = UDim2.new(1, 0, 0, 36), BackgroundColor3 = C.bg, BorderSizePixel = 0, ZIndex = 3}, main)
+round(title, 14)
+new("Frame", {Size = UDim2.new(1, 0, 0, 12), Position = UDim2.new(0, 0, 1, -12), BackgroundColor3 = C.bg, BorderSizePixel = 0, ZIndex = 3}, title)
+text3d(title, {
+    Text = "BALEREOT  •  PLAY MODE", TextSize = 12, Color = C.accent, Position = UDim2.fromOffset(12, 0),
+    Size = UDim2.new(1, -20, 1, 0), Z = 4,
+})
+
+-- geser panel lewat title
 do
     local dragging, dragStart, startPos
     connect(title.InputBegan, function(i)
         if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
-            dragging, dragStart, startPos = true, i.Position, main.Position
+            dragging, dragStart, startPos = true, i.Position, rootF.Position
         end
     end)
     connect(UIS.InputChanged, function(i)
         if dragging and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then
             local d = i.Position - dragStart
-            main.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X, startPos.Y.Scale, startPos.Y.Offset + d.Y)
+            rootF.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X, startPos.Y.Scale, startPos.Y.Offset + d.Y)
         end
     end)
     connect(UIS.InputEnded, function(i)
@@ -245,112 +372,154 @@ do
     end)
 end
 
-local y = 42
-local function toggleRow(label, key, onChange)
-    local row = new("Frame", {Size = UDim2.new(1, -16, 0, 32), Position = UDim2.fromOffset(8, y), BackgroundColor3 = C.input, BorderSizePixel = 0}, main)
-    round(row, 8)
-    new("TextLabel", {
-        Size = UDim2.new(1, -70, 1, 0), Position = UDim2.fromOffset(10, 0), BackgroundTransparency = 1, Text = label,
-        TextColor3 = C.text, Font = Enum.Font.GothamBold, TextSize = 11, TextXAlignment = Enum.TextXAlignment.Left,
-    }, row)
-    local btn = new("TextButton", {
-        Size = UDim2.fromOffset(52, 22), Position = UDim2.new(1, -60, 0.5, -11), BackgroundColor3 = C.bg,
-        Text = "OFF", TextColor3 = C.sub, Font = Enum.Font.GothamBold, TextSize = 10, BorderSizePixel = 0, AutoButtonColor = false,
-    }, row)
-    round(btn, 11)
-    local function paint()
-        local on = S[key]
-        TweenService:Create(btn, TweenInfo.new(0.15), {BackgroundColor3 = on and C.accent or C.bg}):Play()
-        btn.Text = on and "ON" or "OFF"
-        btn.TextColor3 = on and C.ink or C.sub
-    end
-    btn.MouseButton1Click:Connect(function()
-        S[key] = not S[key]
-        paint()
-        if onChange then onChange(S[key]) end
-    end)
-    y += 38
+-- isi panel bisa di-scroll
+local body = new("ScrollingFrame", {
+    Size = UDim2.new(1, -12, 1, -48), Position = UDim2.fromOffset(6, 42), BackgroundTransparency = 1,
+    BorderSizePixel = 0, ScrollBarThickness = 3, ScrollBarImageColor3 = C.accent, CanvasSize = UDim2.new(),
+    AutomaticCanvasSize = Enum.AutomaticSize.Y, ScrollingDirection = Enum.ScrollingDirection.Y, ZIndex = 3,
+}, main)
+new("UIListLayout", {Padding = UDim.new(0, 6), SortOrder = Enum.SortOrder.LayoutOrder}, body)
+new("UIPadding", {PaddingRight = UDim.new(0, 5), PaddingBottom = UDim.new(0, 6)}, body)
+
+local order = 0
+local function addRow(h)
+    order += 1
+    local row = new("Frame", {Size = UDim2.new(1, 0, 0, h), BackgroundColor3 = C.input, BorderSizePixel = 0, LayoutOrder = order, ZIndex = 3}, body)
+    round(row, 9)
+    return row
 end
 
-local function speedRow(label, key, minV, maxV, step, onChange)
-    local row = new("Frame", {Size = UDim2.new(1, -16, 0, 32), Position = UDim2.fromOffset(8, y), BackgroundColor3 = C.input, BorderSizePixel = 0}, main)
-    round(row, 8)
-    new("TextLabel", {
-        Size = UDim2.new(0, 70, 1, 0), Position = UDim2.fromOffset(10, 0), BackgroundTransparency = 1, Text = label,
-        TextColor3 = C.sub, Font = Enum.Font.GothamBold, TextSize = 10, TextXAlignment = Enum.TextXAlignment.Left,
-    }, row)
-    local function mkBtn(txt, x)
-        local b = new("TextButton", {
-            Size = UDim2.fromOffset(26, 22), Position = UDim2.new(1, x, 0.5, -11), BackgroundColor3 = C.accent,
-            Text = txt, TextColor3 = C.ink, Font = Enum.Font.GothamBold, TextSize = 14, BorderSizePixel = 0,
-        }, row)
-        round(b, 6)
-        return b
+local function addSection(txt)
+    order += 1
+    local f = new("Frame", {Size = UDim2.new(1, 0, 0, 18), BackgroundTransparency = 1, LayoutOrder = order, ZIndex = 3}, body)
+    text3d(f, {Text = txt, TextSize = 9, Color = C.sub, Position = UDim2.fromOffset(4, 0)})
+end
+
+local function addToggle(label, key, onChange)
+    local row = addRow(40)
+    text3d(row, {Text = label, TextSize = 11, Color = C.text, Position = UDim2.fromOffset(10, 0), Size = UDim2.new(1, -78, 1, 0)})
+    local b
+    local function paint()
+        local on = S[key]
+        if on then
+            b.setColor(C.accent)
+            b.label.set("ON", C.ink, C.accent2)
+        else
+            b.setColor(C.off)
+            b.label.set("OFF", C.sub)
+        end
     end
-    local minus, plus = mkBtn("-", -122), mkBtn("+", -34)
+    b = btn3d(row, {
+        Size = UDim2.fromOffset(56, 28), Position = UDim2.new(1, -64, 0.5, -14), Color = C.off, Text = "OFF",
+        TextColor = C.sub, Radius = 14, TextSize = 10,
+        onClick = function()
+            S[key] = not S[key]
+            paint()
+            if onChange then onChange(S[key]) end
+        end,
+    })
+    paint()
+end
+
+local function addSpeed(label, key, minV, maxV, step, onChange)
+    local row = addRow(40)
+    text3d(row, {Text = label, TextSize = 10, Color = C.sub, Position = UDim2.fromOffset(10, 0), Size = UDim2.new(0, 80, 1, 0)})
     local box = new("TextBox", {
-        Size = UDim2.fromOffset(52, 22), Position = UDim2.new(1, -92, 0.5, -11), BackgroundColor3 = C.bg,
-        Text = tostring(S[key]), TextColor3 = C.text, Font = Enum.Font.Code, TextSize = 11, BorderSizePixel = 0,
-        ClearTextOnFocus = false,
+        Size = UDim2.fromOffset(52, 24), Position = UDim2.new(1, -92, 0.5, -12), BackgroundColor3 = C.bg,
+        Text = tostring(S[key]), TextColor3 = C.text, Font = Enum.Font.Code, TextSize = 12, BorderSizePixel = 0,
+        ClearTextOnFocus = false, ZIndex = 4,
     }, row)
     round(box, 6)
+    new("UIStroke", {Color = C.stroke, Thickness = 1, Transparency = 0.4}, box)
     local function setV(v)
         v = math.clamp(math.floor(v + 0.5), minV, maxV)
         S[key] = v
         box.Text = tostring(v)
         if onChange then onChange(v) end
     end
-    minus.MouseButton1Click:Connect(function() setV(S[key] - step) end)
-    plus.MouseButton1Click:Connect(function() setV(S[key] + step) end)
-    box.FocusLost:Connect(function()
-        local n = tonumber(box.Text)
-        setV(n or S[key])
-    end)
-    y += 38
+    btn3d(row, {
+        Size = UDim2.fromOffset(28, 28), Position = UDim2.new(1, -124, 0.5, -14), Color = C.accent, Text = "-",
+        TextSize = 16, Radius = 7, onClick = function() setV(S[key] - step) end,
+    })
+    btn3d(row, {
+        Size = UDim2.fromOffset(28, 28), Position = UDim2.new(1, -36, 0.5, -14), Color = C.accent, Text = "+",
+        TextSize = 16, Radius = 7, onClick = function() setV(S[key] + step) end,
+    })
+    box.FocusLost:Connect(function() setV(tonumber(box.Text) or S[key]) end)
 end
 
-toggleRow("GOD MODE (KEBAL)", "god", function(on) if on then godOn() else godOff() end end)
-toggleRow("FLY", "fly", function(on) if on then flyOn() else flyOff() end end)
-speedRow("Fly speed", "flySpeed", 1, 500, 10)
-toggleRow("INFINITE JUMP", "inf")
-toggleRow("NOCLIP", "noclip", function(on) if not on then noclipOff() end end)
-toggleRow("LARI CEPAT", "sprint", function(on)
+addSection("PERTAHANAN")
+addToggle("GOD MODE (KEBAL)", "god", function(on) if on then godOn() else godOff() end end)
+
+addSection("GERAK")
+addToggle("FLY", "fly", function(on) if on then flyOn() else flyOff() end end)
+addSpeed("Fly speed", "flySpeed", 1, 500, 10)
+do
+    local row = addRow(40)
+    btn3d(row, {
+        Size = UDim2.new(0.5, -9, 0, 30), Position = UDim2.new(0, 6, 0.5, -15), Color = C.accent, Text = "NAIK ▲",
+        onDown = function() upHeld = true end, onUp = function() upHeld = false end,
+    })
+    btn3d(row, {
+        Size = UDim2.new(0.5, -9, 0, 30), Position = UDim2.new(0.5, 3, 0.5, -15), Color = C.accent, Text = "TURUN ▼",
+        onDown = function() downHeld = true end, onUp = function() downHeld = false end,
+    })
+end
+addToggle("INFINITE JUMP", "inf")
+addToggle("NOCLIP", "noclip", function(on) if not on then noclipOff() end end)
+addToggle("LARI CEPAT", "sprint", function(on)
     if not on and hum then hum.WalkSpeed = DEFAULT_WALK end
 end)
-speedRow("Run speed", "runSpeed", 16, 500, 10)
+addSpeed("Run speed", "runSpeed", 16, 500, 10)
 
--- Tombol NAIK / TURUN (untuk HP saat fly)
+addSection("SERANGAN")
+addToggle("DAMAGE BOOST", "dmg")
+addSpeed("Damage x", "dmgMult", 1, 100, 1)
+addSpeed("Jangkauan", "reach", 5, 60, 5)
 do
-    local function holdBtn(txt, x, setter)
-        local b = new("TextButton", {
-            Size = UDim2.new(0.5, -12, 0, 30), Position = UDim2.new(x, x == 0 and 8 or 4, 0, y), BackgroundColor3 = C.input,
-            Text = txt, TextColor3 = C.accent, Font = Enum.Font.GothamBold, TextSize = 11, BorderSizePixel = 0, AutoButtonColor = true,
-        }, main)
-        round(b, 8)
-        new("UIStroke", {Color = C.stroke, Thickness = 1}, b)
-        b.MouseButton1Down:Connect(function() setter(true) end)
-        b.MouseButton1Up:Connect(function() setter(false) end)
-        b.MouseLeave:Connect(function() setter(false) end)
-    end
-    holdBtn("NAIK ▲", 0, function(v) upHeld = v end)
-    holdBtn("TURUN ▼", 0.5, function(v) downHeld = v end)
+    local row = addRow(30)
+    new("TextLabel", {
+        Size = UDim2.new(1, -16, 1, 0), Position = UDim2.fromOffset(8, 0), BackgroundTransparency = 1, ZIndex = 4,
+        Text = hasTouch and "Pegang senjata (Tool), lalu serang musuh." or "Executor tidak punya firetouchinterest, Damage Boost tidak aktif.",
+        TextColor3 = hasTouch and C.sub or C.red, Font = Enum.Font.Gotham, TextSize = 9, TextWrapped = true,
+        TextXAlignment = Enum.TextXAlignment.Left,
+    }, row)
 end
 
--- Tombol BC kecil untuk show/hide panel
-local bc = new("TextButton", {
-    Size = UDim2.fromOffset(36, 36), Position = UDim2.new(0, 14, 0.5, -224), BackgroundColor3 = C.accent,
-    Text = "BC", TextColor3 = C.ink, Font = Enum.Font.GothamBold, TextSize = 12, BorderSizePixel = 0,
+-- =====================================================================
+-- Tombol BC di tepi kiri: buka/tutup panel dengan animasi slide
+-- =====================================================================
+local isOpen = true
+local tabHolder = new("Frame", {
+    Size = UDim2.fromOffset(38, 64), Position = UDim2.new(0, OPEN_X + W + 8, 0.5, -32), BackgroundTransparency = 1, ZIndex = 5,
 }, gui)
-round(bc, 18)
-bc.MouseButton1Click:Connect(function() main.Visible = not main.Visible end)
+local tab = btn3d(tabHolder, {
+    Size = UDim2.fromScale(1, 1), Position = UDim2.new(), Color = C.accent, Text = "BC", TextSize = 13, Radius = 10,
+})
+local function setOpen(open)
+    isOpen = open
+    local info = TweenInfo.new(0.35, Enum.EasingStyle.Back, open and Enum.EasingDirection.Out or Enum.EasingDirection.In)
+    local cur = rootF.Position
+    TweenService:Create(rootF, info, {Position = UDim2.new(0, open and OPEN_X or CLOSED_X, cur.Y.Scale, cur.Y.Offset)}):Play()
+    TweenService:Create(tabHolder, info, {Position = UDim2.new(0, (open and (OPEN_X + W + 8)) or 6, 0.5, -32)}):Play()
+    tab.label.set(open and "BC" or "BC", C.ink, C.accent2)
+end
+tab.face.MouseButton1Click:Connect(function() setOpen(not isOpen) end)
 connect(UIS.InputBegan, function(i, processed)
-    if not processed and i.KeyCode == Enum.KeyCode.RightShift then main.Visible = not main.Visible end
+    if not processed and i.KeyCode == Enum.KeyCode.RightShift then setOpen(not isOpen) end
 end)
 
--- Cleanup kalau script dijalankan lagi
+-- animasi pop saat pertama muncul
+rootF.Position = UDim2.new(0, CLOSED_X, 0.5, -H / 2)
+tabHolder.Position = UDim2.new(0, 6, 0.5, -32)
+task.defer(function() setOpen(true) end)
+
+-- =====================================================================
+-- Cleanup kalau script dijalankan ulang
+-- =====================================================================
 if getgenv then
     getgenv().BC_PLAYMODE_CLEANUP = function()
-        S.god, S.fly, S.noclip, S.sprint, S.inf = false, false, false, false, false
+        S.god, S.fly, S.noclip, S.sprint, S.inf, S.dmg = false, false, false, false, false, false
         pcall(godOff); pcall(flyOff); pcall(noclipOff)
         if hum then pcall(function() hum.WalkSpeed = DEFAULT_WALK end) end
         for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
