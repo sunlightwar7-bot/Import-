@@ -1,550 +1,149 @@
--- BALEREOT COMMUNITY | PLAY MODE v2
--- God Mode | Fly | Infinite Jump | Noclip | Lari Cepat | Damage Boost (lipat damage ke musuh/NPC)
--- Buka/tutup panel: tombol "BC" di tepi kiri atau RightShift
--- Fly: gerak = joystick / WASD (ikut arah kamera), naik = Space / E / tombol NAIK, turun = Q / tombol TURUN
+-- BALEREOT | GAME COMBAT (server)
+-- Taruh sebagai *Script* di ServerScriptService.
+--
+-- Isi:
+--  1) Musuh: Model berisi Humanoid + HumanoidRootPart yang bernama "Enemy"
+--     (atau diberi tag "Enemy") otomatis mengejar pemain terdekat dan menyerang.
+--  2) Senjata: Tool dengan part "Handle". Atur damage dasar lewat Attribute "Damage" di Tool.
+--  3) Semua damage lewat satu fungsi applyDamage -> God Mode benar-benar kebal.
+--  4) Damage pemain ke musuh dikali PLAYER_DAMAGE_MULT.
+--
+-- Script lain di game-mu bisa memberi damage lewat:  _G.BC_Damage(humanoid, jumlah)
 
 local Players = game:GetService("Players")
-local RunService = game:GetService("RunService")
-local UIS = game:GetService("UserInputService")
-local TweenService = game:GetService("TweenService")
+local CollectionService = game:GetService("CollectionService")
 
-local lp = Players.LocalPlayer
-local cam = workspace.CurrentCamera
+local CONFIG = {
+    GOD_ALL = true,              -- true = semua pemain kebal
+    GOD_USERS = {},              -- kalau GOD_ALL = false, isi nama pemain, contoh {"NamaKamu"}
+    PLAYER_DAMAGE_MULT = 5,      -- damage senjata pemain ke musuh dikali ini
+    DEFAULT_WEAPON_DAMAGE = 10,  -- damage dasar Tool kalau tidak punya Attribute "Damage"
+    SWING_TIME = 0.5,            -- lama ayunan senjata yang bisa mengenai musuh (detik)
 
-pcall(function()
-    if getgenv and getgenv().BC_PLAYMODE_CLEANUP then getgenv().BC_PLAYMODE_CLEANUP() end
-end)
-
-local S = {
-    god = false, fly = false, inf = false, noclip = false, sprint = false, dmg = false,
-    flySpeed = 60, runSpeed = 50, dmgMult = 5, reach = 15,
+    ENEMY_DAMAGE = 20,
+    ENEMY_ATTACK_RANGE = 5,
+    ENEMY_COOLDOWN = 1,
+    ENEMY_SIGHT = 80,
+    ENEMY_SPEED = 14,
 }
-local char, hum, root
-local DEFAULT_WALK = 16
-local conns = {}
-local function connect(sig, fn) local c = sig:Connect(fn); conns[#conns + 1] = c; return c end
 
 -- =====================================================================
--- GOD MODE (kebal beneran)
+-- DAMAGE (satu pintu)
 -- =====================================================================
-local healthConn, lastSafe
-local function godOn()
-    if not hum or not char then return end
-    pcall(function()
-        hum.BreakJointsOnDeath = false
-        hum.RequiresNeck = false
-        hum:SetStateEnabled(Enum.HumanoidStateType.Dead, false)
-        hum.MaxHealth = math.huge
-        hum.Health = math.huge
-    end)
-    if not char:FindFirstChild("BC_FF") then
-        local ff = Instance.new("ForceField")
-        ff.Name = "BC_FF"; ff.Visible = false; ff.Parent = char
-    end
-    if healthConn then healthConn:Disconnect() end
-    healthConn = hum.HealthChanged:Connect(function()
-        if S.god and hum and hum.Health < hum.MaxHealth then hum.Health = hum.MaxHealth end
-    end)
-end
-local function godOff()
-    if healthConn then healthConn:Disconnect(); healthConn = nil end
-    if not hum or not char then return end
-    local ff = char:FindFirstChild("BC_FF")
-    if ff then ff:Destroy() end
-    pcall(function()
-        hum:SetStateEnabled(Enum.HumanoidStateType.Dead, true)
-        hum.RequiresNeck = true
-        hum.BreakJointsOnDeath = true
-        hum.MaxHealth = 100
-        hum.Health = 100
-    end)
+local function isGod(player)
+    return CONFIG.GOD_ALL
+        or table.find(CONFIG.GOD_USERS, player.Name) ~= nil
+        or player:GetAttribute("God") == true
 end
 
--- =====================================================================
--- FLY
--- =====================================================================
-local flyBV, flyBG
-local upHeld, downHeld = false, false
-local function flyOff()
-    if flyBV then flyBV:Destroy(); flyBV = nil end
-    if flyBG then flyBG:Destroy(); flyBG = nil end
-    if hum then pcall(function() hum.PlatformStand = false end) end
+local function applyDamage(humanoid, amount, source)
+    if not humanoid or humanoid.Health <= 0 or amount <= 0 then return end
+    local model = humanoid.Parent
+    local player = model and Players:GetPlayerFromCharacter(model)
+    if player and isGod(player) then return end   -- kebal total
+    humanoid.Health = math.max(0, humanoid.Health - amount)
 end
-local function flyOn()
-    flyOff()
-    if not root or not hum then return end
-    flyBV = Instance.new("BodyVelocity")
-    flyBV.MaxForce = Vector3.new(1e9, 1e9, 1e9)
-    flyBV.Velocity = Vector3.zero
-    flyBV.Parent = root
-    flyBG = Instance.new("BodyGyro")
-    flyBG.MaxTorque = Vector3.new(1e9, 1e9, 1e9)
-    flyBG.P = 1e4
-    flyBG.CFrame = cam.CFrame
-    flyBG.Parent = root
-    hum.PlatformStand = true
-end
+_G.BC_Damage = applyDamage
 
 -- =====================================================================
--- NOCLIP
+-- MUSUH
 -- =====================================================================
-local noclipTouched = {}
-local function noclipOff()
-    for part in pairs(noclipTouched) do
-        if part and part.Parent then pcall(function() part.CanCollide = true end) end
-    end
-    noclipTouched = {}
+local function isEnemy(m)
+    return m:IsA("Model") and (m.Name == "Enemy" or CollectionService:HasTag(m, "Enemy"))
 end
 
--- =====================================================================
--- DAMAGE BOOST
---   Tiap kali Tool yang kamu pegang dipakai (Activated), musuh/NPC dalam
---   jangkauan disentuh ulang (dmgMult - 1) kali lewat firetouchinterest,
---   jadi senjata berbasis Touched memberi damage berlipat.
---   Butuh executor dengan firetouchinterest. Tidak berefek kalau damage
---   dihitung server lewat RemoteEvent atau senjata punya debounce.
--- =====================================================================
-local hasTouch = typeof(firetouchinterest) == "function"
-
-local function getEnemies()
-    local list = {}
-    for _, h in ipairs(workspace:GetDescendants()) do
-        if h:IsA("Humanoid") and h.Health > 0 and h.Parent and h.Parent ~= char
-            and not Players:GetPlayerFromCharacter(h.Parent) then
-            local part = h.Parent:FindFirstChild("HumanoidRootPart") or h.Parent:FindFirstChildWhichIsA("BasePart")
-            if part then list[#list + 1] = part end
-        end
-    end
-    return list
-end
-
-local function boost(tool)
-    if not (S.dmg and hasTouch and root) then return end
-    local handle = tool:FindFirstChild("Handle") or tool:FindFirstChildWhichIsA("BasePart")
-    if not handle then return end
-    local extra = math.max(0, S.dmgMult - 1)
-    for _, part in ipairs(getEnemies()) do
-        if root and (part.Position - root.Position).Magnitude <= S.reach then
-            for i = 1, extra do
-                pcall(firetouchinterest, handle, part, 0)
-                pcall(firetouchinterest, handle, part, 1)
-                if i % 20 == 0 then task.wait() end
-            end
-        end
-    end
-end
-
-local hooked = setmetatable({}, {__mode = "k"})
-local function hookTool(t)
-    if not t:IsA("Tool") or hooked[t] then return end
-    hooked[t] = true
-    connect(t.Activated, function() task.spawn(boost, t) end)
-end
-
--- =====================================================================
--- Terapkan ulang fitur setelah respawn
--- =====================================================================
-local function bindChar(c)
-    char = c
-    hum = c:WaitForChild("Humanoid", 10)
-    root = c:WaitForChild("HumanoidRootPart", 10)
+local function runEnemy(model)
+    local hum = model:WaitForChild("Humanoid", 5)
+    local root = model:WaitForChild("HumanoidRootPart", 5)
     if not hum or not root then return end
-    DEFAULT_WALK = 16
-    lastSafe = root.CFrame
-    noclipTouched = {}
-    for _, o in ipairs(c:GetChildren()) do hookTool(o) end
-    connect(c.ChildAdded, hookTool)
-    local bp = lp:FindFirstChildOfClass("Backpack")
-    if bp then
-        for _, o in ipairs(bp:GetChildren()) do hookTool(o) end
-        connect(bp.ChildAdded, hookTool)
-    end
-    if S.god then godOn() end
-    if S.fly then flyOn() end
-end
-if lp.Character then task.spawn(bindChar, lp.Character) end
-connect(lp.CharacterAdded, function(c) task.spawn(bindChar, c) end)
+    hum.WalkSpeed = CONFIG.ENEMY_SPEED
+    local lastAttack = 0
 
--- =====================================================================
--- LOOP UTAMA
--- =====================================================================
-connect(RunService.Heartbeat, function()
-    if not (char and hum and root and root.Parent) then return end
-    cam = workspace.CurrentCamera
-
-    if S.god then
-        if hum.MaxHealth ~= math.huge then pcall(function() hum.MaxHealth = math.huge end) end
-        if hum.Health < hum.MaxHealth then hum.Health = hum.MaxHealth end
-        if hum:GetState() == Enum.HumanoidStateType.Dead then
-            hum:ChangeState(Enum.HumanoidStateType.GettingUp)
-        end
-        if not char:FindFirstChild("BC_FF") then
-            local ff = Instance.new("ForceField")
-            ff.Name = "BC_FF"; ff.Visible = false; ff.Parent = char
-        end
-        local voidY = workspace.FallenPartsDestroyHeight + 60
-        if root.Position.Y > voidY and hum.FloorMaterial ~= Enum.Material.Air then
-            lastSafe = root.CFrame
-        elseif root.Position.Y <= voidY and lastSafe then
-            root.AssemblyLinearVelocity = Vector3.zero
-            root.CFrame = lastSafe + Vector3.new(0, 5, 0)
-        end
-    end
-
-    if S.fly then
-        if not (flyBV and flyBV.Parent) then flyOn() end
-        if flyBV then
-            local md = hum.MoveDirection
-            local cf = cam.CFrame
-            local flatLook = Vector3.new(cf.LookVector.X, 0, cf.LookVector.Z)
-            flatLook = flatLook.Magnitude > 0 and flatLook.Unit or Vector3.new(0, 0, -1)
-            local flatRight = Vector3.new(cf.RightVector.X, 0, cf.RightVector.Z).Unit
-            local f, r = md:Dot(flatLook), md:Dot(flatRight)
-            local dir = cf.LookVector * f + cf.RightVector * r
-            local up = 0
-            if upHeld or UIS:IsKeyDown(Enum.KeyCode.Space) or UIS:IsKeyDown(Enum.KeyCode.E) then up += 1 end
-            if downHeld or UIS:IsKeyDown(Enum.KeyCode.Q) then up -= 1 end
-            dir += Vector3.new(0, up, 0)
-            flyBV.Velocity = dir * S.flySpeed
-            flyBG.CFrame = cf
-        end
-    end
-
-    if S.sprint and not S.fly then hum.WalkSpeed = S.runSpeed end
-end)
-
-connect(RunService.Stepped, function()
-    if S.noclip and char then
-        for _, p in ipairs(char:GetDescendants()) do
-            if p:IsA("BasePart") and p.CanCollide then
-                noclipTouched[p] = true
-                p.CanCollide = false
+    while model.Parent and hum.Health > 0 do
+        local target, bestDist = nil, CONFIG.ENEMY_SIGHT
+        for _, p in ipairs(Players:GetPlayers()) do
+            local c = p.Character
+            local r = c and c:FindFirstChild("HumanoidRootPart")
+            local h = c and c:FindFirstChildOfClass("Humanoid")
+            if r and h and h.Health > 0 then
+                local d = (r.Position - root.Position).Magnitude
+                if d < bestDist then target, bestDist = h, d end
             end
         end
-    end
-end)
 
-connect(UIS.JumpRequest, function()
-    if S.inf and hum and hum.Parent and not S.fly then
-        hum:ChangeState(Enum.HumanoidStateType.Jumping)
-    end
-end)
-
-local gui
-local okGui, errGui = pcall(function()
--- =====================================================================
--- GUI: Royal Gold 3D
--- =====================================================================
-local C = {
-    bg = Color3.fromRGB(14, 12, 17), panel = Color3.fromRGB(22, 19, 26), input = Color3.fromRGB(34, 29, 38),
-    stroke = Color3.fromRGB(110, 86, 40), accent = Color3.fromRGB(236, 186, 74),
-    accent2 = Color3.fromRGB(255, 232, 170), text = Color3.fromRGB(248, 242, 230),
-    sub = Color3.fromRGB(176, 164, 142), ink = Color3.fromRGB(28, 18, 4), off = Color3.fromRGB(64, 55, 70),
-    red = Color3.fromRGB(238, 82, 92),
-}
-local FONT = Enum.Font.GothamBold
-local DEPTH = 4
-
-local function new(class, props, parent)
-    local o = Instance.new(class)
-    for k, v in pairs(props) do o[k] = v end
-    o.Parent = parent
-    return o
-end
-local function round(o, r) new("UICorner", {CornerRadius = UDim.new(0, r or 8)}, o) end
-local function shade(c, f) return Color3.new(math.min(1, c.R * f), math.min(1, c.G * f), math.min(1, c.B * f)) end
-
--- teks 3D: 2 lapis bayangan di belakang teks utama (efek timbul)
-local function text3d(parent, p)
-    local holder = new("Frame", {
-        Size = p.Size or UDim2.fromScale(1, 1), Position = p.Position or UDim2.new(),
-        BackgroundTransparency = 1, ZIndex = p.Z or 3,
-    }, parent)
-    local function lbl(off, col, z)
-        return new("TextLabel", {
-            Size = UDim2.fromScale(1, 1), Position = UDim2.fromOffset(off, off), BackgroundTransparency = 1,
-            Text = p.Text or "", TextColor3 = col, Font = FONT, TextSize = p.TextSize or 11,
-            TextXAlignment = p.XAlign or Enum.TextXAlignment.Left, ZIndex = z,
-        }, holder)
-    end
-    local s2 = lbl(2, Color3.fromRGB(8, 5, 0), (p.Z or 3))
-    local s1 = lbl(1, p.Shadow or shade(p.Color or C.text, 0.4), (p.Z or 3) + 1)
-    local top = lbl(0, p.Color or C.text, (p.Z or 3) + 2)
-    return {
-        set = function(text, color, shadow)
-            for _, l in ipairs({s2, s1, top}) do l.Text = text end
-            top.TextColor3 = color
-            s1.TextColor3 = shadow or shade(color, 0.4)
-        end,
-    }
-end
-
--- tombol 3D: sisi bawah tebal + permukaan yang turun saat ditekan
-local function btn3d(parent, p)
-    local holder = new("Frame", {Size = p.Size, Position = p.Position, BackgroundTransparency = 1, ZIndex = 3}, parent)
-    local depth = new("Frame", {
-        Size = UDim2.new(1, 0, 1, -DEPTH), Position = UDim2.fromOffset(0, DEPTH),
-        BackgroundColor3 = shade(p.Color, 0.5), BorderSizePixel = 0, ZIndex = 3,
-    }, holder)
-    round(depth, p.Radius or 8)
-    local face = new("TextButton", {
-        Size = UDim2.new(1, 0, 1, -DEPTH), BackgroundColor3 = p.Color, Text = "", AutoButtonColor = false,
-        BorderSizePixel = 0, ZIndex = 4,
-    }, holder)
-    round(face, p.Radius or 8)
-    local grad = new("UIGradient", {Rotation = 90}, face)
-    local function setGrad(c)
-        grad.Color = ColorSequence.new({
-            ColorSequenceKeypoint.new(0, shade(c, 1.3)),
-            ColorSequenceKeypoint.new(0.5, c),
-            ColorSequenceKeypoint.new(1, shade(c, 0.82)),
-        })
-    end
-    setGrad(p.Color)
-    new("UIStroke", {Color = shade(p.Color, 0.55), Thickness = 1, Transparency = 0.2}, face)
-    local label = text3d(face, {
-        Text = p.Text, TextSize = p.TextSize or 11, Color = p.TextColor or C.ink,
-        Shadow = p.Shadow, XAlign = Enum.TextXAlignment.Center, Z = 5,
-    })
-    local api = {face = face, label = label}
-    function api.setColor(c)
-        face.BackgroundColor3 = c
-        depth.BackgroundColor3 = shade(c, 0.5)
-        setGrad(c)
-    end
-    local function press(down)
-        TweenService:Create(face, TweenInfo.new(0.06), {Position = UDim2.fromOffset(0, down and (DEPTH - 1) or 0)}):Play()
-    end
-    face.MouseButton1Down:Connect(function() press(true); if p.onDown then p.onDown() end end)
-    face.MouseButton1Up:Connect(function() press(false); if p.onUp then p.onUp() end end)
-    face.MouseLeave:Connect(function() press(false); if p.onUp then p.onUp() end end)
-    face.MouseButton1Click:Connect(function() if p.onClick then p.onClick() end end)
-    return api
-end
-
-gui = new("ScreenGui", {Name = "BC_PlayMode", ResetOnSpawn = false, ZIndexBehavior = Enum.ZIndexBehavior.Sibling, DisplayOrder = 999}, nil)
-local okHui, hui = pcall(function() return gethui and gethui() end)
-local okParent = pcall(function() gui.Parent = (okHui and hui) or lp:WaitForChild("PlayerGui") end)
-if not okParent or not gui.Parent then gui.Parent = lp:WaitForChild("PlayerGui") end
-
--- ukuran panel menyesuaikan tinggi layar, posisi kiri-tengah
-local W = 244
-local H = math.clamp(math.floor(cam.ViewportSize.Y * 0.78), 240, 430)
-local OPEN_X, CLOSED_X = 8, -(W + 24)
-
-local rootF = new("Frame", {
-    Size = UDim2.fromOffset(W, H), Position = UDim2.new(0, OPEN_X, 0.5, -H / 2),
-    BackgroundTransparency = 1, ZIndex = 2,
-}, gui)
-
-local slab = new("Frame", {
-    Size = UDim2.new(1, 0, 1, -5), Position = UDim2.fromOffset(0, 5), BackgroundColor3 = C.stroke,
-    BorderSizePixel = 0, ZIndex = 2,
-}, rootF)
-round(slab, 14)
-local main = new("Frame", {
-    Size = UDim2.new(1, 0, 1, -5), BackgroundColor3 = C.panel, BorderSizePixel = 0, Active = true, ZIndex = 2,
-}, rootF)
-round(main, 14)
-new("UIStroke", {Color = C.accent, Thickness = 1.4, Transparency = 0.35}, main)
-
-local title = new("Frame", {Size = UDim2.new(1, 0, 0, 36), BackgroundColor3 = C.bg, BorderSizePixel = 0, ZIndex = 3}, main)
-round(title, 14)
-new("Frame", {Size = UDim2.new(1, 0, 0, 12), Position = UDim2.new(0, 0, 1, -12), BackgroundColor3 = C.bg, BorderSizePixel = 0, ZIndex = 3}, title)
-text3d(title, {
-    Text = "BALEREOT  •  PLAY MODE", TextSize = 12, Color = C.accent, Position = UDim2.fromOffset(12, 0),
-    Size = UDim2.new(1, -20, 1, 0), Z = 4,
-})
-
--- geser panel lewat title
-do
-    local dragging, dragStart, startPos
-    connect(title.InputBegan, function(i)
-        if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then
-            dragging, dragStart, startPos = true, i.Position, rootF.Position
+        if target then
+            if bestDist <= CONFIG.ENEMY_ATTACK_RANGE then
+                if os.clock() - lastAttack >= CONFIG.ENEMY_COOLDOWN then
+                    lastAttack = os.clock()
+                    applyDamage(target, CONFIG.ENEMY_DAMAGE, model)
+                end
+            else
+                local tr = target.Parent:FindFirstChild("HumanoidRootPart")
+                if tr then hum:MoveTo(tr.Position) end
+            end
         end
-    end)
-    connect(UIS.InputChanged, function(i)
-        if dragging and (i.UserInputType == Enum.UserInputType.MouseMovement or i.UserInputType == Enum.UserInputType.Touch) then
-            local d = i.Position - dragStart
-            rootF.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + d.X, startPos.Y.Scale, startPos.Y.Offset + d.Y)
-        end
-    end)
-    connect(UIS.InputEnded, function(i)
-        if i.UserInputType == Enum.UserInputType.MouseButton1 or i.UserInputType == Enum.UserInputType.Touch then dragging = false end
-    end)
-end
-
--- isi panel bisa di-scroll
-local body = new("ScrollingFrame", {
-    Size = UDim2.new(1, -12, 1, -48), Position = UDim2.fromOffset(6, 42), BackgroundTransparency = 1,
-    BorderSizePixel = 0, ScrollBarThickness = 3, ScrollBarImageColor3 = C.accent, CanvasSize = UDim2.new(),
-    AutomaticCanvasSize = Enum.AutomaticSize.Y, ScrollingDirection = Enum.ScrollingDirection.Y, ZIndex = 3,
-}, main)
-new("UIListLayout", {Padding = UDim.new(0, 6), SortOrder = Enum.SortOrder.LayoutOrder}, body)
-new("UIPadding", {PaddingRight = UDim.new(0, 5), PaddingBottom = UDim.new(0, 6)}, body)
-
-local order = 0
-local function addRow(h)
-    order += 1
-    local row = new("Frame", {Size = UDim2.new(1, 0, 0, h), BackgroundColor3 = C.input, BorderSizePixel = 0, LayoutOrder = order, ZIndex = 3}, body)
-    round(row, 9)
-    return row
-end
-
-local function addSection(txt)
-    order += 1
-    local f = new("Frame", {Size = UDim2.new(1, 0, 0, 18), BackgroundTransparency = 1, LayoutOrder = order, ZIndex = 3}, body)
-    text3d(f, {Text = txt, TextSize = 9, Color = C.sub, Position = UDim2.fromOffset(4, 0)})
-end
-
-local function addToggle(label, key, onChange)
-    local row = addRow(40)
-    text3d(row, {Text = label, TextSize = 11, Color = C.text, Position = UDim2.fromOffset(10, 0), Size = UDim2.new(1, -78, 1, 0)})
-    local b
-    local function paint()
-        local on = S[key]
-        if on then
-            b.setColor(C.accent)
-            b.label.set("ON", C.ink, C.accent2)
-        else
-            b.setColor(C.off)
-            b.label.set("OFF", C.sub)
-        end
-    end
-    b = btn3d(row, {
-        Size = UDim2.fromOffset(56, 28), Position = UDim2.new(1, -64, 0.5, -14), Color = C.off, Text = "OFF",
-        TextColor = C.sub, Radius = 14, TextSize = 10,
-        onClick = function()
-            S[key] = not S[key]
-            paint()
-            if onChange then onChange(S[key]) end
-        end,
-    })
-    paint()
-end
-
-local function addSpeed(label, key, minV, maxV, step, onChange)
-    local row = addRow(40)
-    text3d(row, {Text = label, TextSize = 10, Color = C.sub, Position = UDim2.fromOffset(10, 0), Size = UDim2.new(0, 80, 1, 0)})
-    local box = new("TextBox", {
-        Size = UDim2.fromOffset(52, 24), Position = UDim2.new(1, -92, 0.5, -12), BackgroundColor3 = C.bg,
-        Text = tostring(S[key]), TextColor3 = C.text, Font = Enum.Font.Code, TextSize = 12, BorderSizePixel = 0,
-        ClearTextOnFocus = false, ZIndex = 4,
-    }, row)
-    round(box, 6)
-    new("UIStroke", {Color = C.stroke, Thickness = 1, Transparency = 0.4}, box)
-    local function setV(v)
-        v = math.clamp(math.floor(v + 0.5), minV, maxV)
-        S[key] = v
-        box.Text = tostring(v)
-        if onChange then onChange(v) end
-    end
-    btn3d(row, {
-        Size = UDim2.fromOffset(28, 28), Position = UDim2.new(1, -124, 0.5, -14), Color = C.accent, Text = "-",
-        TextSize = 16, Radius = 7, onClick = function() setV(S[key] - step) end,
-    })
-    btn3d(row, {
-        Size = UDim2.fromOffset(28, 28), Position = UDim2.new(1, -36, 0.5, -14), Color = C.accent, Text = "+",
-        TextSize = 16, Radius = 7, onClick = function() setV(S[key] + step) end,
-    })
-    box.FocusLost:Connect(function() setV(tonumber(box.Text) or S[key]) end)
-end
-
-addSection("PERTAHANAN")
-addToggle("GOD MODE (KEBAL)", "god", function(on) if on then godOn() else godOff() end end)
-
-addSection("GERAK")
-addToggle("FLY", "fly", function(on) if on then flyOn() else flyOff() end end)
-addSpeed("Fly speed", "flySpeed", 1, 500, 10)
-do
-    local row = addRow(40)
-    btn3d(row, {
-        Size = UDim2.new(0.5, -9, 0, 30), Position = UDim2.new(0, 6, 0.5, -15), Color = C.accent, Text = "NAIK ▲",
-        onDown = function() upHeld = true end, onUp = function() upHeld = false end,
-    })
-    btn3d(row, {
-        Size = UDim2.new(0.5, -9, 0, 30), Position = UDim2.new(0.5, 3, 0.5, -15), Color = C.accent, Text = "TURUN ▼",
-        onDown = function() downHeld = true end, onUp = function() downHeld = false end,
-    })
-end
-addToggle("INFINITE JUMP", "inf")
-addToggle("NOCLIP", "noclip", function(on) if not on then noclipOff() end end)
-addToggle("LARI CEPAT", "sprint", function(on)
-    if not on and hum then hum.WalkSpeed = DEFAULT_WALK end
-end)
-addSpeed("Run speed", "runSpeed", 16, 500, 10)
-
-addSection("SERANGAN")
-addToggle("DAMAGE BOOST", "dmg")
-addSpeed("Damage x", "dmgMult", 1, 100, 1)
-addSpeed("Jangkauan", "reach", 5, 60, 5)
-do
-    local row = addRow(30)
-    new("TextLabel", {
-        Size = UDim2.new(1, -16, 1, 0), Position = UDim2.fromOffset(8, 0), BackgroundTransparency = 1, ZIndex = 4,
-        Text = hasTouch and "Pegang senjata (Tool), lalu serang musuh." or "Executor tidak punya firetouchinterest, Damage Boost tidak aktif.",
-        TextColor3 = hasTouch and C.sub or C.red, Font = Enum.Font.Gotham, TextSize = 9, TextWrapped = true,
-        TextXAlignment = Enum.TextXAlignment.Left,
-    }, row)
-end
-
--- =====================================================================
--- Tombol BC di tepi kiri: buka/tutup panel dengan animasi slide
--- =====================================================================
-local isOpen = true
-local tabHolder = new("Frame", {
-    Size = UDim2.fromOffset(38, 64), Position = UDim2.new(0, OPEN_X + W + 8, 0.5, -32), BackgroundTransparency = 1, ZIndex = 5,
-}, gui)
-local tab = btn3d(tabHolder, {
-    Size = UDim2.fromScale(1, 1), Position = UDim2.new(), Color = C.accent, Text = "BC", TextSize = 13, Radius = 10,
-})
-local function setOpen(open)
-    isOpen = open
-    local info = TweenInfo.new(0.35, Enum.EasingStyle.Back, open and Enum.EasingDirection.Out or Enum.EasingDirection.In)
-    local cur = rootF.Position
-    local p1 = UDim2.new(0, open and OPEN_X or CLOSED_X, cur.Y.Scale, cur.Y.Offset)
-    local p2 = UDim2.new(0, (open and (OPEN_X + W + 8)) or 6, 0.5, -32)
-    local okT = pcall(function()
-        TweenService:Create(rootF, info, {Position = p1}):Play()
-        TweenService:Create(tabHolder, info, {Position = p2}):Play()
-    end)
-    if not okT then rootF.Position = p1; tabHolder.Position = p2 end
-    tab.label.set(open and "BC" or "BC", C.ink, C.accent2)
-end
-tab.face.MouseButton1Click:Connect(function() setOpen(not isOpen) end)
-connect(UIS.InputBegan, function(i, processed)
-    if not processed and i.KeyCode == Enum.KeyCode.RightShift then setOpen(not isOpen) end
-end)
-
-
-end)
-
-if not okGui then
-    warn("[BC PlayMode] GUI gagal: " .. tostring(errGui))
-    pcall(function()
-        local eg = Instance.new("ScreenGui")
-        eg.Name = "BC_PlayMode_Error"; eg.ResetOnSpawn = false; eg.DisplayOrder = 999
-        eg.Parent = lp:WaitForChild("PlayerGui")
-        local l = Instance.new("TextLabel")
-        l.Size = UDim2.new(0, 300, 0, 120); l.Position = UDim2.new(0, 8, 0.5, -60)
-        l.BackgroundColor3 = Color3.fromRGB(30, 10, 10); l.TextColor3 = Color3.fromRGB(255, 120, 120)
-        l.TextWrapped = true; l.TextSize = 12; l.Font = Enum.Font.Code
-        l.Text = "PlayMode GUI error:\n" .. tostring(errGui)
-        l.Parent = eg
-        gui = eg
-    end)
-end
-
--- =====================================================================
--- Cleanup kalau script dijalankan ulang
--- =====================================================================
-if getgenv then
-    getgenv().BC_PLAYMODE_CLEANUP = function()
-        S.god, S.fly, S.noclip, S.sprint, S.inf, S.dmg = false, false, false, false, false, false
-        pcall(godOff); pcall(flyOff); pcall(noclipOff)
-        if hum then pcall(function() hum.WalkSpeed = DEFAULT_WALK end) end
-        for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
-        pcall(function() gui:Destroy() end)
+        task.wait(0.2)
     end
 end
+
+local running = setmetatable({}, {__mode = "k"})
+local function tryStart(m)
+    if running[m] or not isEnemy(m) then return end
+    running[m] = true
+    task.spawn(runEnemy, m)
+end
+for _, d in ipairs(workspace:GetDescendants()) do
+    if d:IsA("Model") then tryStart(d) end
+end
+workspace.DescendantAdded:Connect(function(d)
+    if d:IsA("Model") then task.defer(tryStart, d) end
+end)
+CollectionService:GetInstanceAddedSignal("Enemy"):Connect(tryStart)
+
+-- =====================================================================
+-- SENJATA PEMAIN
+-- =====================================================================
+local function hookTool(tool, player)
+    if tool:GetAttribute("BCHooked") then return end
+    local handle = tool:FindFirstChild("Handle")
+    if not handle then return end
+    tool:SetAttribute("BCHooked", true)
+
+    local swinging, hit = false, {}
+    tool.Activated:Connect(function()
+        swinging, hit = true, {}
+        task.delay(CONFIG.SWING_TIME, function() swinging = false end)
+    end)
+    handle.Touched:Connect(function(other)
+        if not swinging then return end
+        local model = other:FindFirstAncestorOfClass("Model")
+        local h = model and model:FindFirstChildOfClass("Humanoid")
+        if not h or hit[h] then return end
+        if model == player.Character or Players:GetPlayerFromCharacter(model) then return end
+        hit[h] = true
+        local base = tool:GetAttribute("Damage") or CONFIG.DEFAULT_WEAPON_DAMAGE
+        applyDamage(h, base * CONFIG.PLAYER_DAMAGE_MULT, player)
+    end)
+end
+
+local function hookContainer(container, player)
+    for _, t in ipairs(container:GetChildren()) do
+        if t:IsA("Tool") then hookTool(t, player) end
+    end
+    container.ChildAdded:Connect(function(t)
+        if t:IsA("Tool") then hookTool(t, player) end
+    end)
+end
+
+local function setupPlayer(player)
+    player.CharacterAdded:Connect(function(c) hookContainer(c, player) end)
+    if player.Character then hookContainer(player.Character, player) end
+
+    player.ChildAdded:Connect(function(o)
+        if o:IsA("Backpack") then hookContainer(o, player) end
+    end)
+    local bp = player:FindFirstChildOfClass("Backpack")
+    if bp then hookContainer(bp, player) end
+end
+Players.PlayerAdded:Connect(setupPlayer)
+for _, p in ipairs(Players:GetPlayers()) do setupPlayer(p) end
