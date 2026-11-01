@@ -1,7 +1,7 @@
 -- BALEREOT COMMUNITY  |  Toolbox + Asset Importer (satu panel)
 --   Tab TOOLBOX     : cari & insert Model / Texture / Decal / Audio lewat Studio Lite
 --   Tab IMPORT FILE : import file .rbxm / .rbxmx / .rbxl / .rbxlx dari workspace executor
---   Tab TOOLS       : Scripts, Optimizer, Analisa, Edit, Cari, Backup, Light, Play, Log
+--   Tab TOOLS       : Scripts, Optimizer, Analisa, Edit, Mesh (Part->MeshPart), Cari, Backup, Light, Play, Log
 --   Akses           : key (Worker ATAU key.txt via KEY_LIST_URL, terikat akun + masa aktif) atau trial gratis 1 hari per akun
 --   Pembuat key     : BalereotKeyManager.lua (script terpisah, khusus owner)
 --   TEMA            : Royal Gold (premium) + tombol 3D + animasi buka/tutup
@@ -3939,6 +3939,397 @@ function ToolsX.log(host, H)
     setFilter("ALL")
 end
 
+-- ===================== MESH (Part -> MeshPart) =====================
+-- Mengubah Part biasa jadi MeshPart TANPA asset ID: bentuk dibuat sendiri lewat EditableMesh
+-- (Block, Ball, Cylinder, Wedge), ukuran/warna/posisi/anak-anak (script, weld, decal) dipindah ke MeshPart baru.
+-- Part di dalam Folder / Model ikut terbaca (dipindai sampai ke semua turunan target).
+function ToolsX.mesh(host, H)
+    local C = H.C
+    local AssetService = game:GetService("AssetService")
+    local CollectionService = game:GetService("CollectionService")
+
+    local templates, templateErr = {}, {}
+    local records = {}
+    local busy, armed = false, false
+    local lastRefs = {}
+    local SEG, RINGS = 32, 16
+
+    local function V(x, y, z) return Vector3.new(x, y, z) end
+
+    -- ---------- geometri unit (ukuran 1 stud, pusat di 0,0,0) ----------
+    local function buildTris(kind)
+        local tris = {}
+        local function tri(a, b, c, na, nb, nc)
+            if (b - a):Cross(c - a).Magnitude < 1e-9 then return end
+            tris[#tris + 1] = {a, b, c, na, nb, nc}
+        end
+        local function quad(a, b, c, d, na, nb, nc, nd)
+            tri(a, b, c, na, nb, nc)
+            tri(a, c, d, na, nc, nd)
+        end
+        local function P(x, y, z) return V(x * 0.5, y * 0.5, z * 0.5) end
+
+        if kind == "Block" then
+            local faces = {
+                {P(1,-1,-1), P(1,1,-1), P(1,1,1), P(1,-1,1)},
+                {P(-1,-1,-1), P(-1,-1,1), P(-1,1,1), P(-1,1,-1)},
+                {P(-1,1,-1), P(-1,1,1), P(1,1,1), P(1,1,-1)},
+                {P(-1,-1,-1), P(1,-1,-1), P(1,-1,1), P(-1,-1,1)},
+                {P(-1,-1,1), P(1,-1,1), P(1,1,1), P(-1,1,1)},
+                {P(-1,-1,-1), P(-1,1,-1), P(1,1,-1), P(1,-1,-1)},
+            }
+            for _, f in ipairs(faces) do quad(f[1], f[2], f[3], f[4]) end
+
+        elseif kind == "Wedge" then
+            -- lereng naik dari depan-bawah (-Z) ke belakang-atas (+Z), sisi tegak di belakang
+            local A, B = P(-1,-1,-1), P(1,-1,-1)
+            local Cc, D = P(-1,-1,1), P(1,-1,1)
+            local E, F = P(-1,1,1), P(1,1,1)
+            quad(A, B, D, Cc)      -- alas
+            quad(Cc, D, F, E)      -- belakang tegak
+            quad(A, B, F, E)       -- lereng
+            tri(A, Cc, E)          -- samping kiri
+            tri(B, D, F)           -- samping kanan
+
+        elseif kind == "Ball" then
+            local function pt(i, j)
+                local phi, th = math.pi * i / RINGS, math.pi * 2 * j / SEG
+                return V(0.5 * math.sin(phi) * math.cos(th), 0.5 * math.cos(phi), 0.5 * math.sin(phi) * math.sin(th))
+            end
+            for i = 0, RINGS - 1 do
+                for j = 0, SEG - 1 do
+                    local a, b, c, d = pt(i, j), pt(i + 1, j), pt(i + 1, j + 1), pt(i, j + 1)
+                    local function nrm(v) return v.Magnitude > 0 and v.Unit or V(0, 1, 0) end
+                    quad(a, b, c, d, nrm(a), nrm(b), nrm(c), nrm(d))
+                end
+            end
+
+        elseif kind == "Cylinder" then
+            -- sumbu silinder Roblox = sumbu X
+            for j = 0, SEG - 1 do
+                local t0, t1 = math.pi * 2 * j / SEG, math.pi * 2 * (j + 1) / SEG
+                local y0, z0, y1, z1 = 0.5 * math.cos(t0), 0.5 * math.sin(t0), 0.5 * math.cos(t1), 0.5 * math.sin(t1)
+                local n0, n1 = V(0, math.cos(t0), math.sin(t0)), V(0, math.cos(t1), math.sin(t1))
+                quad(V(-0.5, y0, z0), V(0.5, y0, z0), V(0.5, y1, z1), V(-0.5, y1, z1), n0, n0, n1, n1)
+                tri(V(0.5, 0, 0), V(0.5, y0, z0), V(0.5, y1, z1))
+                tri(V(-0.5, 0, 0), V(-0.5, y0, z0), V(-0.5, y1, z1))
+            end
+        end
+        return tris
+    end
+
+    -- ---------- template MeshPart per bentuk (dibuat sekali, lalu di-Clone) ----------
+    local function createTemplate(kind)
+        if templates[kind] then return templates[kind] end
+        if templateErr[kind] then return nil, templateErr[kind] end
+        local tris = buildTris(kind)
+        if #tris == 0 then templateErr[kind] = "Bentuk tidak dikenal: " .. kind; return nil, templateErr[kind] end
+        local sum, cnt = Vector3.zero, 0
+        for _, t in ipairs(tris) do
+            for k = 1, 3 do sum += t[k]; cnt += 1 end
+        end
+        local ref = sum / cnt
+
+        local okE, em = pcall(function() return AssetService:CreateEditableMesh() end)
+        if not okE or not em then
+            templateErr[kind] = "EditableMesh tidak didukung di sini"
+            return nil, templateErr[kind]
+        end
+        local okB, errB = pcall(function()
+            for i, t in ipairs(tris) do
+                local a, b, c, na, nb, nc = t[1], t[2], t[3], t[4], t[5], t[6]
+                local g = (b - a):Cross(c - a)
+                local d = (a + b + c) / 3 - ref
+                if g:Dot(d) < 0 then
+                    b, c = c, b
+                    nb, nc = nc, nb
+                    g = -g
+                end
+                local flat = g.Unit
+                local va, vb, vc = em:AddVertex(a), em:AddVertex(b), em:AddVertex(c)
+                local fid = em:AddTriangle(va, vb, vc)
+                pcall(function()
+                    em:SetFaceNormals(fid, {em:AddNormal(na or flat), em:AddNormal(nb or flat), em:AddNormal(nc or flat)})
+                end)
+                if i % 400 == 0 then task.wait() end
+            end
+        end)
+        if not okB then
+            templateErr[kind] = "Gagal membangun mesh: " .. tostring(errB):sub(1, 60)
+            return nil, templateErr[kind]
+        end
+        local okM, mp = pcall(function() return AssetService:CreateMeshPartAsync(Content.fromObject(em)) end)
+        if not okM or typeof(mp) ~= "Instance" then
+            okM, mp = pcall(function() return AssetService:CreateMeshPartAsync(em) end)
+        end
+        if not okM or typeof(mp) ~= "Instance" then
+            templateErr[kind] = "CreateMeshPartAsync gagal: " .. tostring(mp):sub(1, 60)
+            return nil, templateErr[kind]
+        end
+        templates[kind] = mp
+        return mp
+    end
+
+    -- ---------- klasifikasi part ----------
+    -- return: kind | nil, alasanDilewati
+    local function classify(p)
+        if not p:IsA("BasePart") or p:IsA("Terrain") then return nil end
+        if p:IsA("MeshPart") or p:IsA("UnionOperation") or p:IsA("TrussPart") then return nil end
+        if p:IsA("Seat") or p:IsA("VehicleSeat") or p:IsA("SpawnLocation") then return nil, "fungsional (seat/spawn)" end
+        if p:IsA("CornerWedgePart") then return nil, "CornerWedge" end
+        if p:FindFirstChildWhichIsA("DataModelMesh") then return nil, "ada SpecialMesh" end
+        local m = p.Parent
+        while m and m ~= workspace and m ~= game do
+            if m:IsA("Model") and m:FindFirstChildOfClass("Humanoid") then return nil, "karakter" end
+            m = m.Parent
+        end
+        if p:IsA("WedgePart") then return "Wedge" end
+        if p.ClassName == "Part" then
+            local s = p.Shape
+            if s == Enum.PartType.Ball then return "Ball" end
+            if s == Enum.PartType.Cylinder then return "Cylinder" end
+            return "Block"
+        end
+        return nil
+    end
+
+    -- referensi ke part (Weld.Part0/Part1, PrimaryPart, ObjectValue) supaya ikut dipindah ke MeshPart baru
+    local function collectRefs(objs)
+        local map = {}
+        local function add(part, inst, prop)
+            map[part] = map[part] or {}
+            table.insert(map[part], {inst, prop})
+        end
+        for i, o in ipairs(objs) do
+            if o:IsA("JointInstance") or o:IsA("WeldConstraint") then
+                for _, pr in ipairs({"Part0", "Part1"}) do
+                    local ok, v = pcall(function() return o[pr] end)
+                    if ok and typeof(v) == "Instance" then add(v, o, pr) end
+                end
+            elseif o:IsA("Model") then
+                local ok, v = pcall(function() return o.PrimaryPart end)
+                if ok and typeof(v) == "Instance" then add(v, o, "PrimaryPart") end
+            elseif o:IsA("ObjectValue") then
+                local v = o.Value
+                if typeof(v) == "Instance" then add(v, o, "Value") end
+            end
+            if i % 3000 == 0 then task.wait() end
+        end
+        return map
+    end
+
+    local COPY = {"Color", "Material", "MaterialVariant", "Transparency", "Reflectance", "Anchored", "CanCollide",
+        "CanTouch", "CanQuery", "CastShadow", "Massless", "Locked", "CollisionGroup", "CustomPhysicalProperties", "RootPriority"}
+
+    local function convertOne(p, refs)
+        local kind, why = classify(p)
+        if not kind then return false, why or "bukan part yang bisa dikonversi" end
+        local tpl, err = createTemplate(kind)
+        if not tpl then return false, err end
+        local n = tpl:Clone()
+        n.Name = p.Name
+        n.Size = p.Size
+        n.CFrame = p.CFrame
+        for _, prop in ipairs(COPY) do
+            pcall(function() n[prop] = p[prop] end)
+        end
+        pcall(function() n.RenderFidelity = Enum.RenderFidelity.Precise end)
+        pcall(function() n.CollisionFidelity = (kind == "Block") and Enum.CollisionFidelity.Box or Enum.CollisionFidelity.Hull end)
+        for k, v in pairs(p:GetAttributes()) do pcall(function() n:SetAttribute(k, v) end) end
+        for _, t in ipairs(CollectionService:GetTags(p)) do pcall(function() CollectionService:AddTag(n, t) end) end
+
+        local parent, kids = p.Parent, p:GetChildren()
+        n.Parent = parent
+        for _, ch in ipairs(kids) do pcall(function() ch.Parent = n end) end
+        for _, r in ipairs(refs or {}) do pcall(function() r[1][r[2]] = n end) end
+        p.Parent = nil
+        records[#records + 1] = {old = p, new = n, parent = parent, kids = kids, refs = refs or {}}
+        return true
+    end
+
+    local function undoAll()
+        local n = 0
+        for i = #records, 1, -1 do
+            local r = records[i]
+            pcall(function() r.old.Parent = r.parent end)
+            for _, ch in ipairs(r.kids) do
+                pcall(function() if ch.Parent == r.new then ch.Parent = r.old end end)
+            end
+            for _, ref in ipairs(r.refs) do pcall(function() ref[1][ref[2]] = r.old end) end
+            pcall(function() r.new:Destroy() end)
+            n += 1
+        end
+        records = {}
+        return n
+    end
+
+    -- ---------- UI ----------
+    local summary = H.label(host, "SCAN untuk melihat part yang bisa dikonversi (termasuk di dalam Folder/Model).", UDim2.fromOffset(0, 58), UDim2.new(1, 0, 0, 16), C.sub, 9)
+    summary.Font = Enum.Font.GothamBold
+    local R = H.results(host, UDim2.fromOffset(0, 76), UDim2.new(1, 0, 1, -76))
+    local undoBtn
+
+    local function refreshUndoText()
+        if undoBtn then undoBtn.Text = "UNDO KONVERSI (" .. #records .. ")" end
+    end
+
+    local function skipText(skipped)
+        local out = {}
+        for why, n in pairs(skipped) do out[#out + 1] = n .. " " .. why end
+        return (#out > 0) and (" | dilewati: " .. table.concat(out, ", ")) or ""
+    end
+
+    local function scan(rootsOverride)
+        if busy then return end
+        busy = true
+        summary.Text = "Memindai..."
+        summary.TextColor3 = C.text
+        local ok, err = pcall(function()
+            local roots = rootsOverride or H.targetsOrWorkspace()
+            local objs = allDesc(roots)
+            lastRefs = collectRefs(objs)
+            local items, total, nested, skipped = {}, 0, 0, {}
+            for i, o in ipairs(objs) do
+                if o:IsA("BasePart") and not o:IsDescendantOf(H.gui) then
+                    local kind, why = classify(o)
+                    if kind then
+                        total += 1
+                        local par = o.Parent
+                        local inGroup = par and (par:IsA("Model") or par:IsA("Folder"))
+                        if inGroup then nested += 1 end
+                        if #items < 300 then
+                            items[#items + 1] = {
+                                title = ("%s [%s]"):format(o.Name, kind),
+                                desc = o:GetFullName() .. (inGroup and ("  (di dalam " .. par.ClassName .. ")") or ""),
+                                color = C.stroke, objs = {o},
+                                acts = {H.ACT_SELECT, {"KONVERSI", function(it, card)
+                                    task.spawn(function()
+                                        local okC, e = convertOne(o, lastRefs[o])
+                                        if okC then
+                                            it.done = true
+                                            card:Destroy()
+                                            refreshUndoText()
+                                            H.setStatus("Dikonversi: " .. o.Name, C.green)
+                                        else
+                                            H.setStatus("Gagal: " .. tostring(e), C.red)
+                                        end
+                                    end)
+                                end, C.accent, C.ink}},
+                            }
+                        end
+                    elseif why then
+                        skipped[why] = (skipped[why] or 0) + 1
+                    end
+                end
+                if i % 3000 == 0 then task.wait() end
+            end
+            R.set(items)
+            summary.Text = ("%d part bisa dikonversi (%d di dalam Folder/Model)%s"):format(total, nested, skipText(skipped))
+            summary.TextColor3 = (total > 0) and C.green or C.yellow
+        end)
+        busy = false
+        if not ok then
+            summary.Text = "Gagal scan: " .. tostring(err):sub(1, 60)
+            summary.TextColor3 = C.red
+        end
+    end
+
+    local function convertAll(btn)
+        if busy then return end
+        local roots = H.targetsOrWorkspace()
+        if roots[1] == workspace and not armed then
+            armed = true
+            btn.Text = "YAKIN? TAP LAGI"
+            task.delay(3, function() armed = false; btn.Text = "KONVERSI SEMUA" end)
+            return
+        end
+        armed = false
+        btn.Text = "KONVERSI SEMUA"
+        busy = true
+        summary.Text = "Mengonversi..."
+        summary.TextColor3 = C.text
+        local okAll, errAll = pcall(function()
+            local objs = allDesc(roots)
+            local refs = collectRefs(objs)
+            local todo = {}
+            for _, o in ipairs(objs) do
+                if o:IsA("BasePart") and not o:IsDescendantOf(H.gui) and classify(o) then todo[#todo + 1] = o end
+            end
+            local okN, failN, firstErr = 0, 0, nil
+            for i, p in ipairs(todo) do
+                local okC, e = convertOne(p, refs[p])
+                if okC then
+                    okN += 1
+                else
+                    failN += 1
+                    firstErr = firstErr or e
+                    if okN == 0 and failN >= 1 and templateErr.Block then break end -- mesh tidak didukung, hentikan
+                end
+                if i % 40 == 0 then
+                    summary.Text = ("Mengonversi %d / %d..."):format(i, #todo)
+                    task.wait()
+                end
+            end
+            summary.Text = ("%d part jadi MeshPart%s"):format(okN, failN > 0 and (" | " .. failN .. " gagal: " .. tostring(firstErr):sub(1, 50)) or "")
+            summary.TextColor3 = (failN == 0) and C.green or C.yellow
+            H.setStatus("Selesai. UNDO KONVERSI untuk membatalkan.", C.green)
+        end)
+        busy = false
+        refreshUndoText()
+        if not okAll then
+            summary.Text = "Gagal: " .. tostring(errAll):sub(1, 60)
+            summary.TextColor3 = C.red
+        end
+    end
+
+    local function makeExample()
+        local cf = H.spawnCFrame()
+        local folder = Instance.new("Folder")
+        folder.Name = "ContohKonversi"
+        local model = Instance.new("Model")
+        model.Name = "ContohModel"
+        model.Parent = folder
+        local defs = {
+            {"PartBlock", "Part", Enum.PartType.Block, Color3.fromRGB(236, 186, 74)},
+            {"PartBall", "Part", Enum.PartType.Ball, Color3.fromRGB(255, 142, 72)},
+            {"PartCylinder", "Part", Enum.PartType.Cylinder, Color3.fromRGB(90, 228, 150)},
+            {"PartWedge", "WedgePart", nil, Color3.fromRGB(238, 82, 92)},
+        }
+        for i, d in ipairs(defs) do
+            local p = Instance.new(d[2])
+            p.Name = d[1]
+            p.Anchored = true
+            p.Size = Vector3.new(4, 4, 4)
+            p.Color = d[4]
+            if d[3] then p.Shape = d[3] end
+            p.CFrame = cf * CFrame.new((i - 2.5) * 6, 2.5, 0)
+            p.Parent = model
+        end
+        folder.Parent = workspace
+        H.selectObj(folder)
+        H.setStatus("Contoh dibuat: Workspace/ContohKonversi/ContohModel/(4 part)", C.green)
+        scan({folder})
+    end
+
+    H.rowBtns(host, 0, 26, {
+        {"SCAN", function() task.spawn(scan) end, C.accent, C.ink, 8.5},
+        {"KONVERSI SEMUA", function(b) task.spawn(convertAll, b) end, C.accent, C.ink, 8.5},
+    })
+    local _, b2 = H.rowBtns(host, 30, 24, {
+        {"UNDO KONVERSI (0)", function()
+            task.spawn(function()
+                local n = undoAll()
+                refreshUndoText()
+                summary.Text = n .. " part dikembalikan jadi Part biasa"
+                summary.TextColor3 = C.yellow
+                H.setStatus("Undo konversi selesai", C.green)
+            end)
+        end, C.input, C.red, 8.5},
+        {"BUAT CONTOH", function() task.spawn(makeExample) end, C.input, C.accent2, 8.5},
+    })
+    undoBtn = b2[1]
+end
+
 -- =========================================================
 -- TAB TOOLS: SCRIPT LIBRARY + OPTIMIZER
 -- =========================================================
@@ -4425,7 +4816,7 @@ local function buildTools(host, ctx)
     panes.Scripts = libPane
     panes.Optimizer = optPane
     local TABS = {{"Scripts", "SCRIPTS"}, {"Optimizer", "OPTIMIZER"}, {"Analisa", "ANALISA"}, {"Edit", "EDIT"}, {"Cari", "CARI"},
-        {"Backup", "BACKUP"}, {"Light", "LIGHT"}, {"Play", "PLAY"}, {"Log", "LOG"}}
+        {"Mesh", "MESH"}, {"Backup", "BACKUP"}, {"Light", "LIGHT"}, {"Play", "PLAY"}, {"Log", "LOG"}}
     local subButtons = {}
     local function showSub(name)
         for n, p in pairs(panes) do p.Visible = (n == name) end
@@ -4727,7 +5118,7 @@ local function buildTools(host, ctx)
     applyFilter()
 
     local EXTRA = {
-        {"Analisa", ToolsX.analyze}, {"Edit", ToolsX.edit}, {"Cari", ToolsX.find}, {"Backup", ToolsX.backup},
+        {"Analisa", ToolsX.analyze}, {"Edit", ToolsX.edit}, {"Mesh", ToolsX.mesh}, {"Cari", ToolsX.find}, {"Backup", ToolsX.backup},
         {"Light", ToolsX.light}, {"Play", ToolsX.play}, {"Log", ToolsX.log},
     }
     for _, e in ipairs(EXTRA) do
