@@ -3952,6 +3952,8 @@ function ToolsX.mesh(host, H)
     local records = {}
     local busy, armed = false, false
     local lastRefs = {}
+    local mode = "toMesh"      -- toMesh = Part -> MeshPart | toPart = MeshPart -> Part
+    local backShape = "Block"  -- bentuk untuk MeshPart bukan hasil konversi tool ini
     local SEG, RINGS = 32, 16
 
     local function V(x, y, z) return Vector3.new(x, y, z) end
@@ -4137,6 +4139,7 @@ function ToolsX.mesh(host, H)
         pcall(function() n.CollisionFidelity = (kind == "Block") and Enum.CollisionFidelity.Box or Enum.CollisionFidelity.Hull end)
         for k, v in pairs(p:GetAttributes()) do pcall(function() n:SetAttribute(k, v) end) end
         for _, t in ipairs(CollectionService:GetTags(p)) do pcall(function() CollectionService:AddTag(n, t) end) end
+        pcall(function() n:SetAttribute("BC_Shape", kind) end)
 
         local parent, kids = p.Parent, p:GetChildren()
         n.Parent = parent
@@ -4145,6 +4148,60 @@ function ToolsX.mesh(host, H)
         p.Parent = nil
         records[#records + 1] = {old = p, new = n, parent = parent, kids = kids, refs = refs or {}}
         return true
+    end
+
+    -- ---------- MeshPart -> Part biasa ----------
+    -- MeshPart hasil konversi tool ini kembali ke bentuk aslinya (atribut BC_Shape).
+    -- MeshPart lain (dari model luar) jadi Part dengan bentuk pilihan tombol BENTUK, ukuran = ukuran MeshPart.
+    local function classifyBack(p)
+        if not p:IsA("MeshPart") then return nil end
+        local m = p.Parent
+        while m and m ~= workspace and m ~= game do
+            if m:IsA("Model") and m:FindFirstChildOfClass("Humanoid") then return nil, "karakter" end
+            m = m.Parent
+        end
+        local tag = p:GetAttribute("BC_Shape")
+        if tag == "Block" or tag == "Ball" or tag == "Cylinder" or tag == "Wedge" then return tag end
+        return backShape
+    end
+
+    local function convertBack(p, refs)
+        local kind, why = classifyBack(p)
+        if not kind then return false, why or "bukan MeshPart" end
+        local n
+        if kind == "Wedge" then
+            n = Instance.new("WedgePart")
+        else
+            n = Instance.new("Part")
+            n.Shape = (kind == "Ball") and Enum.PartType.Ball or ((kind == "Cylinder") and Enum.PartType.Cylinder or Enum.PartType.Block)
+        end
+        n.Name = p.Name
+        n.Size = p.Size
+        n.CFrame = p.CFrame
+        for _, prop in ipairs(COPY) do
+            pcall(function() n[prop] = p[prop] end)
+        end
+        for k, v in pairs(p:GetAttributes()) do pcall(function() n:SetAttribute(k, v) end) end
+        pcall(function() n:SetAttribute("BC_Shape", nil) end)
+        for _, t in ipairs(CollectionService:GetTags(p)) do pcall(function() CollectionService:AddTag(n, t) end) end
+
+        local parent, kids = p.Parent, p:GetChildren()
+        n.Parent = parent
+        for _, ch in ipairs(kids) do pcall(function() ch.Parent = n end) end
+        for _, r in ipairs(refs or {}) do pcall(function() r[1][r[2]] = n end) end
+        p.Parent = nil
+        records[#records + 1] = {old = p, new = n, parent = parent, kids = kids, refs = refs or {}}
+        return true
+    end
+
+    -- pemilih sesuai mode aktif
+    local function candidate(o)
+        if mode == "toMesh" then return classify(o) end
+        return classifyBack(o)
+    end
+    local function doConvert(o, refs)
+        if mode == "toMesh" then return convertOne(o, refs) end
+        return convertBack(o, refs)
     end
 
     local function undoAll()
@@ -4164,9 +4221,9 @@ function ToolsX.mesh(host, H)
     end
 
     -- ---------- UI ----------
-    local summary = H.label(host, "SCAN untuk melihat part yang bisa dikonversi (termasuk di dalam Folder/Model).", UDim2.fromOffset(0, 58), UDim2.new(1, 0, 0, 16), C.sub, 9)
+    local summary = H.label(host, "SCAN untuk melihat part yang bisa dikonversi (termasuk di dalam Folder/Model).", UDim2.fromOffset(0, 86), UDim2.new(1, 0, 0, 16), C.sub, 9)
     summary.Font = Enum.Font.GothamBold
-    local R = H.results(host, UDim2.fromOffset(0, 76), UDim2.new(1, 0, 1, -76))
+    local R = H.results(host, UDim2.fromOffset(0, 104), UDim2.new(1, 0, 1, -104))
     local undoBtn
 
     local function refreshUndoText()
@@ -4191,7 +4248,7 @@ function ToolsX.mesh(host, H)
             local items, total, nested, skipped = {}, 0, 0, {}
             for i, o in ipairs(objs) do
                 if o:IsA("BasePart") and not o:IsDescendantOf(H.gui) then
-                    local kind, why = classify(o)
+                    local kind, why = candidate(o)
                     if kind then
                         total += 1
                         local par = o.Parent
@@ -4199,12 +4256,12 @@ function ToolsX.mesh(host, H)
                         if inGroup then nested += 1 end
                         if #items < 300 then
                             items[#items + 1] = {
-                                title = ("%s [%s]"):format(o.Name, kind),
+                                title = ("%s [%s]"):format(o.Name, (mode == "toMesh") and kind or ("Mesh > " .. kind)),
                                 desc = o:GetFullName() .. (inGroup and ("  (di dalam " .. par.ClassName .. ")") or ""),
                                 color = C.stroke, objs = {o},
                                 acts = {H.ACT_SELECT, {"KONVERSI", function(it, card)
                                     task.spawn(function()
-                                        local okC, e = convertOne(o, lastRefs[o])
+                                        local okC, e = doConvert(o, lastRefs[o])
                                         if okC then
                                             it.done = true
                                             card:Destroy()
@@ -4224,7 +4281,7 @@ function ToolsX.mesh(host, H)
                 if i % 3000 == 0 then task.wait() end
             end
             R.set(items)
-            summary.Text = ("%d part bisa dikonversi (%d di dalam Folder/Model)%s"):format(total, nested, skipText(skipped))
+            summary.Text = ("%d %s bisa dikonversi (%d di dalam Folder/Model)%s"):format(total, (mode == "toMesh") and "part" or "MeshPart", nested, skipText(skipped))
             summary.TextColor3 = (total > 0) and C.green or C.yellow
         end)
         busy = false
@@ -4253,11 +4310,11 @@ function ToolsX.mesh(host, H)
             local refs = collectRefs(objs)
             local todo = {}
             for _, o in ipairs(objs) do
-                if o:IsA("BasePart") and not o:IsDescendantOf(H.gui) and classify(o) then todo[#todo + 1] = o end
+                if o:IsA("BasePart") and not o:IsDescendantOf(H.gui) and candidate(o) then todo[#todo + 1] = o end
             end
             local okN, failN, firstErr = 0, 0, nil
             for i, p in ipairs(todo) do
-                local okC, e = convertOne(p, refs[p])
+                local okC, e = doConvert(p, refs[p])
                 if okC then
                     okN += 1
                 else
@@ -4270,7 +4327,7 @@ function ToolsX.mesh(host, H)
                     task.wait()
                 end
             end
-            summary.Text = ("%d part jadi MeshPart%s"):format(okN, failN > 0 and (" | " .. failN .. " gagal: " .. tostring(firstErr):sub(1, 50)) or "")
+            summary.Text = ("%d part jadi " .. ((mode == "toMesh") and "MeshPart" or "Part biasa") .. "%s"):format(okN, failN > 0 and (" | " .. failN .. " gagal: " .. tostring(firstErr):sub(1, 50)) or "")
             summary.TextColor3 = (failN == 0) and C.green or C.yellow
             H.setStatus("Selesai. UNDO KONVERSI untuk membatalkan.", C.green)
         end)
@@ -4320,13 +4377,37 @@ function ToolsX.mesh(host, H)
             task.spawn(function()
                 local n = undoAll()
                 refreshUndoText()
-                summary.Text = n .. " part dikembalikan jadi Part biasa"
+                summary.Text = n .. " objek dikembalikan ke bentuk sebelum konversi"
                 summary.TextColor3 = C.yellow
                 H.setStatus("Undo konversi selesai", C.green)
             end)
         end, C.input, C.red, 8.5},
         {"BUAT CONTOH", function() task.spawn(makeExample) end, C.input, C.accent2, 8.5},
     })
+    local _, b3 = H.rowBtns(host, 58, 24, {
+        {"MODE: PART > MESH", nil, C.stroke, C.text, 8.5},
+        {"BENTUK MESH LAIN: BLOCK", nil, C.input, C.accent2, 8},
+    })
+    local modeBtn, shapeBtn = b3[1], b3[2]
+    local SHAPES = {"Block", "Ball", "Cylinder", "Wedge"}
+    local function paintMode()
+        modeBtn.Text = (mode == "toMesh") and "MODE: PART > MESH" or "MODE: MESH > PART"
+        shapeBtn.Text = "BENTUK MESH LAIN: " .. backShape:upper()
+        shapeBtn.TextColor3 = (mode == "toPart") and C.accent2 or C.dim
+    end
+    modeBtn.MouseButton1Click:Connect(function()
+        mode = (mode == "toMesh") and "toPart" or "toMesh"
+        paintMode()
+        R.set({})
+        summary.Text = (mode == "toMesh") and "Mode Part > MeshPart. Tekan SCAN." or "Mode MeshPart > Part. Tekan SCAN (hasil konversi tool ini kembali ke bentuk asal)."
+        summary.TextColor3 = C.sub
+    end)
+    shapeBtn.MouseButton1Click:Connect(function()
+        local idx = table.find(SHAPES, backShape) or 1
+        backShape = SHAPES[idx % #SHAPES + 1]
+        paintMode()
+    end)
+    paintMode()
     undoBtn = b2[1]
 end
 
